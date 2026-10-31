@@ -186,6 +186,9 @@ pub fn queueWrite(
     _ = linefeed;
     if (data.len == 0) return;
 
+    if (std.mem.startsWith(u8, data, "\x1b]7501;?")) {
+        log.info("queueing program status reply pane=%{d} mailbox={}", .{ self.pane_id, self.surface_mailbox != null });
+    }
     const req: apprt.surface.Message.WriteReq = try .init(alloc, data);
     self.send(.{ .tmux_send_keys = req });
 }

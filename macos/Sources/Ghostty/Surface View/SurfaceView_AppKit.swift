@@ -2391,7 +2391,7 @@ extension Ghostty.SurfaceView {
         return .textArea
     }
 
-    override func accessibilityIdentifier() -> String? {
+    override func accessibilityIdentifier() -> String {
         "terminal-\(id.uuidString)"
     }
 

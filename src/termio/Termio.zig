@@ -485,6 +485,9 @@ pub fn queueInput(
     data: []const u8,
     linefeed: bool,
 ) !void {
+    if (std.mem.startsWith(u8, data, "\x1b]7501;?")) {
+        log.info("writing program status reply backend={t}", .{std.meta.activeTag(self.backend)});
+    }
     if (self.inTmuxControlMode()) return try self.tmuxSendKeys(td, data);
     try self.queueWrite(td, data, linefeed);
 }
