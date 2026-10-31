@@ -20,6 +20,7 @@ const usage =
     \\  --terminfo[=bool]     Install Ghostty terminfo on first connect. Default: true.
     \\  --cache[=bool]        Use the terminfo install cache. Default: true.
     \\  --ssh=<path>          Path to the ssh binary. Default: first `ssh` on PATH.
+    \\  --reconnect[=bool]    Retry SSH exit status 255 after two seconds. Default: false.
     \\  --verbose             Print +ssh status lines to stderr.
     \\  --help                Show full help.
     \\
@@ -49,6 +50,9 @@ pub const Options = struct {
 
     /// When true, print verbose output to stderr.
     verbose: bool = false,
+
+    /// Retry connection failures for reconnectable sessions such as tmux.
+    reconnect: bool = false,
 
     /// Arguments passed through to `ssh` verbatim. Populated by
     /// `parseManuallyHook` when we reach the first non-flag argument (or
@@ -183,6 +187,10 @@ pub const Options = struct {
 ///
 ///   * `--ssh=<path>`: Path to the `ssh` binary to execute. Default: the
 ///     first `ssh` found on `PATH`.
+///
+///   * `--reconnect=<bool>`: Retry when ssh exits with status 255, after a
+///     two-second pause. A normal detach, other exit status, or signal stops
+///     the command. Intended for reconnectable sessions such as tmux.
 ///
 ///   * `--verbose`: Print +ssh status lines to stderr, and surface
 ///     remote stderr during the terminfo install.
@@ -363,11 +371,17 @@ fn runInner(
     });
     verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
 
-    const exit_code = childExec(argv, if (environ_map) |*m| m else null) catch |err| {
-        try stderr.print("Error: failed to run {s}: {t}\n", .{ argv[0], err });
-        return 1;
+    const exit_code = while (true) {
+        const code = childExec(argv, if (environ_map) |*m| m else null) catch |err| {
+            try stderr.print("Error: failed to run {s}: {t}\n", .{ argv[0], err });
+            return 1;
+        };
+        verbosePrint(opts, stderr, "exit: {d}", .{code});
+        if (!opts.reconnect or code != 255) break code;
+        try stderr.writeAll("Connection lost. Reconnecting…\r\n");
+        try stderr.flush();
+        try std.Io.sleep(global.io(), .fromSeconds(2), .awake);
     };
-    verbosePrint(opts, stderr, "exit: {d}", .{exit_code});
 
     // Attempt to cache (if needed) on a successful ssh execution.
     if (exit_code == 0) if (session.to_cache) |entry| {
@@ -758,4 +772,32 @@ test "parseDestination: result is a valid cache key" {
         const result = parseDestination(arena.allocator(), stdout).?;
         try testing.expect(DiskCache.isValidCacheKey(result));
     }
+}
+
+test "ssh reconnect retries connection failure and stops at a remote exit" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realPathFileAlloc(global.io(), ".", alloc);
+    defer alloc.free(directory);
+    const marker = try std.fs.path.join(alloc, &.{ directory, "attempt" });
+    defer alloc.free(marker);
+    const arguments = [_][]const u8{
+        "-c",
+        "if [ -f \"$1\" ]; then exit 7; fi; : > \"$1\"; exit 255",
+        "reconnect",
+        marker,
+    };
+    var opts: Options = .{
+        .ssh = "/bin/sh",
+        .terminfo = false,
+        .@"forward-env" = false,
+        .reconnect = true,
+    };
+    defer opts._ssh_args.deinit(alloc);
+    try opts._ssh_args.appendSlice(alloc, &arguments);
+    var stderr: std.Io.Writer.Allocating = .init(alloc);
+    defer stderr.deinit();
+    try testing.expectEqual(@as(u8, 7), try runInner(alloc, &opts, &stderr.writer));
 }
