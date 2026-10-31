@@ -1158,7 +1158,7 @@ class BaseTerminalController: NSWindowController,
 
     func fullscreenDidChange() {
         guard !presentationSuspended else {
-            window?.orderOut(nil)
+            suspendPresentation()
             return
         }
         guard let fullscreenStyle else { return }
