@@ -15,6 +15,9 @@ protocol TerminalViewDelegate: AnyObject {
     /// The cell size changed.
     func cellSizeDidChange(to: NSSize)
 
+    /// The space available to the terminal panes, excluding window chrome.
+    func terminalSizeDidChange(to: NSSize)
+
     /// Perform an action. At the time of writing this is only triggered by the command palette.
     func performAction(_ action: String, on: Ghostty.SurfaceView)
 
@@ -83,6 +86,9 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         tree: viewModel.surfaceTree,
                         action: { delegate?.performSplitAction($0) })
                         .environmentObject(ghostty)
+                        .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                            delegate?.terminalSizeDidChange(to: size)
+                        }
                         .ghosttyLastFocusedSurface(lastFocusedSurface)
                         .focused($focused)
                         .onAppear { self.focused = true }

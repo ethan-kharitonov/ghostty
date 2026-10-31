@@ -19,6 +19,8 @@ extension Ghostty {
         /// Optional delegate
         weak var delegate: GhosttyAppDelegate?
 
+        private let tmuxWindows = TmuxWindows()
+
         /// The readiness value of the state.
         @Published var readiness: Readiness = .loading
 
@@ -42,6 +44,11 @@ extension Ghostty {
         var needsConfirmQuit: Bool {
             guard let app = app else { return false }
             return ghostty_app_needs_confirm_quit(app)
+        }
+
+        func prepareQuit() {
+            tmuxWindows.isTerminating = true
+            if let app { ghostty_app_prepare_quit(app) }
         }
 
         init(configPath: String? = nil) {
@@ -596,6 +603,12 @@ extension Ghostty {
 
             // Action dispatch
             switch action.tag {
+            case GHOSTTY_ACTION_TMUX_WINDOW:
+                guard let userdata = ghostty_app_userdata(app),
+                      let spec = action.action.tmux_window.spec else { return false }
+                let state = Unmanaged<App>.fromOpaque(userdata).takeUnretainedValue()
+                return state.tmuxWindows.apply(spec, app: state)
+
             case GHOSTTY_ACTION_QUIT:
                 quit(app)
 

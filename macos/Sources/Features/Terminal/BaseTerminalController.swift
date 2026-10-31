@@ -446,6 +446,13 @@ class BaseTerminalController: NSWindowController,
             guard response == .alertFirstButtonReturn else { return }
 
             let newTitle = textField.stringValue
+            if let surface = self.focusedSurface?.surface {
+                let action = "set_tab_title:\(newTitle)"
+                let handled = action.withCString {
+                    ghostty_surface_tmux_binding_action(surface, $0, UInt(action.utf8.count))
+                }
+                if handled { return }
+            }
             if newTitle.isEmpty {
                 self.titleOverride = nil
             } else {
@@ -945,6 +952,8 @@ class BaseTerminalController: NSWindowController,
         guard to.width > 0 && to.height > 0 else { return }
         self.window?.contentResizeIncrements = to
     }
+
+    func terminalSizeDidChange(to: NSSize) {}
 
     func performSplitAction(_ action: TerminalSplitOperation) {
         switch action {

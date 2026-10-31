@@ -71,7 +71,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // time of writing this: it'd just restore to a shell in the same directory
         // as the script. We may want to revisit this behavior when we have scrollback
         // restoration.
-        self.restorable = (base?.command ?? "") == ""
+        self.restorable = (base?.command ?? "") == "" && (base?.tmuxSession ?? 0) == 0
 
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)

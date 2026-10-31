@@ -1391,6 +1391,9 @@ pub const Session = struct {
         /// The user closed the tab, with its close button or its menu.
         close_tab: Tab,
 
+        /// The user confirmed closing the pane represented by the event's surface.
+        close_pane: u64,
+
         /// A split was dragged onto the event's surface, to be placed
         /// beside it.
         move_pane: MovePane,
@@ -1452,6 +1455,12 @@ pub const Session = struct {
     /// about this session, so the apprt handles it natively.
     pub fn nativeEvent(self: *Session, surface: *const Surface, event: NativeEvent) bool {
         switch (event) {
+            .close_pane => |attach| {
+                if (attach != self.attach) return false;
+                const pane = self.paneForSurface(surface) orelse return false;
+                self.sendCommandFmt("kill-pane -t %{d}\n", .{pane});
+                return true;
+            },
             .view_size => |v| {
                 if (v.tab.session != self.attach) return false;
                 if (!self.mirrored.contains(v.tab.window)) return false;
