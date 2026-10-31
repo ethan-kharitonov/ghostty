@@ -339,6 +339,7 @@ const DerivedConfig = struct {
     mouse_interval: u64,
     mouse_hide_while_typing: bool,
     mouse_reporting: bool,
+    mouse_reporting_events: configpkg.Config.MouseReportingEvents,
     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
     mouse_shift_capture: configpkg.MouseShiftCapture,
     fullscreen: configpkg.Fullscreen,
@@ -421,6 +422,7 @@ const DerivedConfig = struct {
             .mouse_interval = config.@"click-repeat-interval" * 1_000_000, // 500ms
             .mouse_hide_while_typing = config.@"mouse-hide-while-typing",
             .mouse_reporting = config.@"mouse-reporting",
+            .mouse_reporting_events = config.@"mouse-reporting-events",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
             .mouse_shift_capture = config.@"mouse-shift-capture",
             .fullscreen = config.fullscreen,
@@ -3040,7 +3042,7 @@ pub fn keyCallback(
         // 1. mouse reporting is off
         // OR
         // 2. mouse reporting is on and we are not reporting shift to the terminal
-        if (self.io.terminal.flags.mouse_event == .none or
+        if (!self.isMouseButtonReporting() or
             (self.mouse.mods.shift and !self.mouseShiftCapture(false)))
         {
             // Refresh our link state
@@ -3055,7 +3057,7 @@ pub fn keyCallback(
                 log.warn("failed to refresh links err={}", .{err});
                 break :mouse_mods;
             };
-        } else if (self.io.terminal.flags.mouse_event != .none and !self.mouse.mods.shift) {
+        } else if (self.isMouseButtonReporting() and !self.mouse.mods.shift) {
             // If we have mouse reports on and we don't have shift pressed, we reset state
             _ = try self.rt_app.performAction(
                 .{ .surface = self },
@@ -3075,7 +3077,7 @@ pub fn keyCallback(
     // needed, depending on the key state.
     if ((SurfaceMouse{
         .physical_key = event.key,
-        .mouse_event = self.io.terminal.flags.mouse_event,
+        .mouse_event = if (self.isMouseButtonReporting()) self.io.terminal.flags.mouse_event else .none,
         .mouse_shape = self.io.terminal.mouse_shape,
         .mods = self.mouse.mods,
         .over_link = self.mouse.over_link,
@@ -3997,10 +3999,14 @@ fn isMouseReporting(self: *const Surface) bool {
         self.io.terminal.flags.mouse_event != .none;
 }
 
-pub fn mouseReportingActive(self: *Surface) bool {
+fn isMouseButtonReporting(self: *const Surface) bool {
+    return self.config.mouse_reporting_events == .all and self.isMouseReporting();
+}
+
+pub fn mouseCaptured(self: *Surface) bool {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
-    return self.isMouseReporting();
+    return self.isMouseButtonReporting();
 }
 
 fn mouseReport(
@@ -4071,6 +4077,8 @@ fn mouseReport(
 /// events. It is up to the caller to still verify it is a situation in which
 /// shift capture makes sense (i.e. left button, mouse click, etc.)
 fn mouseShiftCapture(self: *const Surface, lock: bool) bool {
+    if (!self.config.mouse_reporting or self.config.mouse_reporting_events == .scroll) return false;
+
     // Handle our never/always case where we don't need a lock.
     switch (self.config.mouse_shift_capture) {
         .never => return false,
@@ -4095,14 +4103,6 @@ fn mouseShiftCapture(self: *const Surface, lock: bool) bool {
         .true => true,
         .never, .always => unreachable, // handled earlier
     };
-}
-
-/// Returns true if the mouse is currently captured by the terminal
-/// (i.e. reporting events).
-pub fn mouseCaptured(self: *Surface) bool {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
-    return self.io.terminal.flags.mouse_event != .none;
 }
 
 /// Called for mouse button press/release events. This will return true
@@ -4251,7 +4251,7 @@ pub fn mouseButtonCallback(
     {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
-        if (self.isMouseReporting()) report: {
+        if (self.isMouseButtonReporting()) report: {
             // If we have shift-pressed and we aren't allowed to capture it,
             // then we do not do a mouse report.
             if (mods.shift and !shift_capture) break :report;
@@ -4728,7 +4728,7 @@ fn linkAtPin(
 fn mouseModsWithCapture(self: *Surface, mods: input.Mods) input.Mods {
     // In any of these scenarios, whatever mods are set (even shift)
     // are preserved.
-    if (self.io.terminal.flags.mouse_event == .none) return mods;
+    if (!self.isMouseButtonReporting()) return mods;
     if (!mods.shift) return mods;
     if (self.mouseShiftCapture(false)) return mods;
 
@@ -4960,7 +4960,7 @@ pub fn cursorPosCallback(
     if ((over_link or
         self.mouse.link_point == null or
         (self.mouse.link_point != null and !self.mouse.link_point.?.eql(pos_vp))) and
-        (self.io.terminal.flags.mouse_event == .none or
+        (!self.isMouseButtonReporting() or
             (self.mouse.mods.shift and !self.mouseShiftCapture(false))))
     {
         // If we were previously over a link, we always update. We do this so that if the text
@@ -4969,7 +4969,7 @@ pub fn cursorPosCallback(
     }
 
     // Do a mouse report
-    if (self.isMouseReporting()) report: {
+    if (self.isMouseButtonReporting()) report: {
         // Shift overrides mouse "grabbing" in the window, taken from Kitty.
         // This only applies if there is a mouse button pressed so that
         // movement reports are not affected.

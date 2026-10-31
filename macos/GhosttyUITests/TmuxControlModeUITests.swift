@@ -34,6 +34,47 @@ final class TmuxControlModeUITests: XCTestCase {
     }
 
     @MainActor
+    func testMouseSelectionPreservesApplicationScrolling() throws {
+        let base = try String(contentsOf: config, encoding: .utf8)
+        try (base + "\nmouse-reporting-events = scroll\nfont-family = Monaco\nfont-size = 12\nwindow-padding-x = 8\nwindow-padding-y = 8\n")
+            .write(to: config, atomically: true, encoding: .utf8)
+        launchConnectedTerminal()
+        let script = config.appendingPathExtension("py")
+        defer { try? FileManager.default.removeItem(at: script) }
+        try #"""
+        import os, re, tty
+        tty.setraw(0)
+        os.write(1, b'\x1b[?1003h\x1b[?1006h\x1b[2J\x1b[HSELECTME\r\n')
+        received = b''
+        scrolled = False
+        while chunk := os.read(0, 4096):
+            received += chunk
+            events = list(re.finditer(rb'\x1b\[<(\d+);\d+;\d+[Mm]', received))
+            for event in events:
+                if int(event[1]) & 64:
+                    if not scrolled:
+                        os.write(1, b'WHEEL\r\n')
+                        scrolled = True
+                else:
+                    os.write(1, b'UNEXPECTED_INPUT\r\n')
+            if events:
+                received = received[events[-1].end():]
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        try tmux(["respawn-pane", "-k", "-t", "native:0.1", "/usr/bin/python3", script.path])
+        waitForServerOutput(["capture-pane", "-p", "-t", "native:0.1"], equals: "SELECTME")
+        let pane = app.groups["Right pane"]
+        let origin = pane.coordinate(withNormalizedOffset: .zero)
+        let start = origin.withOffset(CGVector(dx: 9, dy: 14))
+        let end = origin.withOffset(CGVector(dx: 200, dy: 14))
+        start.click(forDuration: 0.1, thenDragTo: end)
+        NSPasteboard.general.clearContents()
+        app.typeKey("c", modifierFlags: .command)
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), "SELECTME")
+        pane.scroll(byDeltaX: 0, deltaY: -40)
+        waitForServerOutput(["capture-pane", "-p", "-t", "native:0.1"], equals: "SELECTME\nWHEEL")
+    }
+
+    @MainActor
     func testITermStatusUpdatesTheNativeTab() throws {
         launchConnectedTerminal()
         try writePaneOutput("\u{1b}]21337;status=working;indicator=#ffa500\u{7}")
