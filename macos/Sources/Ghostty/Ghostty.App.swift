@@ -1239,6 +1239,9 @@ extension Ghostty {
                     name: .ghosttyBellDidRing,
                     object: surfaceView
                 )
+                if appState(fromView: surfaceView)?.config.bellFeatures.contains(.notification) == true {
+                    showDesktopNotification(surfaceView, title: "Terminal bell", body: "A terminal needs your attention.")
+                }
 
             default:
                 assertionFailure()
@@ -1653,19 +1656,18 @@ extension Ghostty {
             body: String,
             requireFocus: Bool = true) {
             let center = UNUserNotificationCenter.current()
-            center.requestAuthorization(options: [.alert, .sound]) { _, error in
+            center.requestAuthorization(options: [.alert, .sound]) { [weak surfaceView] granted, error in
                 if let error = error {
                     Ghostty.logger.error("Error while requesting notification authorization: \(error, privacy: .public)")
                 }
-            }
-
-            center.getNotificationSettings { settings in
-                guard settings.authorizationStatus == .authorized else { return }
-                surfaceView.showUserNotification(
-                    title: title,
-                    body: body,
-                    requireFocus: requireFocus
-                )
+                guard granted else { return }
+                DispatchQueue.main.async { [weak surfaceView] in
+                    surfaceView?.showUserNotification(
+                        title: title,
+                        body: body,
+                        requireFocus: requireFocus
+                    )
+                }
             }
         }
 

@@ -3316,6 +3316,10 @@ keybind: Keybinds = .{},
 ///
 ///    Available since: 1.2.0 on GTK, 1.2.1 on macOS
 ///
+///  * `notification`
+///
+///    Send a desktop notification for an unfocused terminal on macOS.
+///
 /// Example: `audio`, `no-audio`, `system`, `no-system`
 ///
 /// Available since: 1.2.0
@@ -9385,6 +9389,7 @@ pub const BellFeatures = packed struct {
     attention: bool = true,
     title: bool = true,
     border: bool = false,
+    notification: bool = false,
 };
 
 /// See mouse-reporting-events

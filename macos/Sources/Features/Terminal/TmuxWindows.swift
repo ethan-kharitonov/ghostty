@@ -13,8 +13,10 @@ final class TmuxWindows {
         var selected: UInt?
         var frame: NSRect?
         var requestFocus = false
+        let fullscreenMode: FullscreenMode?
+        var pendingFullscreen: [UInt] = []
 
-        init(parent: ghostty_surface_t?) {
+        init(parent: ghostty_surface_t?, fullscreenMode: FullscreenMode?) {
             if let parent, let userdata = ghostty_surface_userdata(parent) {
                 let view = Unmanaged<Ghostty.SurfaceView>.fromOpaque(userdata).takeUnretainedValue()
                 gateway = BaseTerminalController.controller(owning: view)
@@ -22,6 +24,11 @@ final class TmuxWindows {
                 gateway = nil
             }
             frame = gateway?.window?.frame
+            if let style = gateway?.fullscreenStyle, style.isFullscreen {
+                self.fullscreenMode = style.fullscreenMode
+            } else {
+                self.fullscreenMode = fullscreenMode
+            }
             requestFocus = gateway?.suspendPresentation() ?? false
         }
     }
@@ -37,7 +44,7 @@ final class TmuxWindows {
             if let existing = sessions[info.session] {
                 session = existing
             } else if info.node_count > 0 {
-                session = Session(parent: info.parent)
+                session = Session(parent: info.parent, fullscreenMode: app.config.windowFullscreen)
                 sessions[info.session] = session
             } else {
                 continue
@@ -67,6 +74,14 @@ final class TmuxWindows {
            let controller = session.windows[selected] {
             controller.window?.makeKeyAndOrderFront(nil)
         }
+        if !isTerminating, let mode = session.fullscreenMode {
+            for id in session.pendingFullscreen {
+                guard let controller = session.windows[id],
+                      controller.fullscreenStyle?.isFullscreen != true else { continue }
+                controller.toggleFullscreen(mode: mode)
+            }
+        }
+        session.pendingFullscreen.removeAll()
         for controller in session.windows.values where !isTerminating && controller.window?.isKeyWindow == true {
             if let view = controller.focusedSurface { Ghostty.moveFocus(to: view) }
         }
@@ -154,6 +169,7 @@ final class TmuxWindows {
         controller.apply(info, layout: layout,
                          sibling: sibling, after: after, created: created,
                          frame: first ? session.frame : nil)
+        if created && sibling == nil { session.pendingFullscreen.append(id.window) }
         return true
     }
 }
