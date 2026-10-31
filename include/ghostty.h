@@ -1021,12 +1021,18 @@ typedef enum {
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
   GHOSTTY_ACTION_RESIZE_WINDOW,
   GHOSTTY_ACTION_TMUX_WINDOW,
+  GHOSTTY_ACTION_COPROCESS,
 } ghostty_action_tag_e;
 
 // The spec and all strings borrowed from it are valid during the action callback.
 typedef struct {
   const void* spec;
 } ghostty_action_tmux_window_s;
+
+typedef struct {
+  const uint8_t* command;
+  uintptr_t command_len;
+} ghostty_action_coprocess_s;
 
 typedef struct {
   uint64_t session;
@@ -1057,6 +1063,7 @@ typedef struct {
 
 typedef union {
   ghostty_action_tmux_window_s tmux_window;
+  ghostty_action_coprocess_s coprocess;
   ghostty_action_split_direction_e new_split;
   ghostty_action_fullscreen_e toggle_fullscreen;
   ghostty_action_move_tab_s move_tab;
@@ -1239,6 +1246,7 @@ GHOSTTY_API bool ghostty_surface_key(ghostty_surface_t, ghostty_input_key_s);
 GHOSTTY_API bool ghostty_surface_key_is_binding(ghostty_surface_t,
                                                    ghostty_input_key_s,
                                                    ghostty_binding_flags_e*);
+GHOSTTY_API bool ghostty_surface_write(ghostty_surface_t, const uint8_t*, uintptr_t);
 GHOSTTY_API void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API void ghostty_surface_paste_text(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);

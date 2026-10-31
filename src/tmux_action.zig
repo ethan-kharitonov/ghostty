@@ -180,6 +180,7 @@ pub fn translate(
     ctx: Context,
 ) Allocator.Error!Result {
     return switch (action) {
+        .tmux_command => |command| try single(alloc, "{s}", .{command}),
         //-----------------------------------------------------------
         // Splits: tmux panes
 
@@ -312,6 +313,7 @@ pub fn translate(
         .csi,
         .esc,
         .text,
+        .coprocess,
         .cursor_key,
 
         // Native: the view of the terminal. Nothing here changes what

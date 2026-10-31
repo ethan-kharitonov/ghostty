@@ -405,7 +405,38 @@ extension Ghostty {
             fatalError("init(coder:) is not supported for this view")
         }
 
+        private var coprocesses: [UUID: TerminalCoprocess] = [:]
+
+        func runCoprocess(_ command: String) {
+            let id = UUID()
+            do {
+                coprocesses[id] = try TerminalCoprocess(command: command) { [weak self] bytes in
+                    guard let surface = self?.surface else { return }
+                    bytes.withUnsafeBytes { buffer in
+                        guard let pointer = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                        _ = ghostty_surface_write(surface, pointer, UInt(buffer.count))
+                    }
+                } completion: { [weak self] failure in
+                    guard let self else { return }
+                    self.coprocesses.removeValue(forKey: id)
+                    if let failure { self.showCoprocessFailure(failure) }
+                }
+            } catch {
+                showCoprocessFailure(error.localizedDescription)
+            }
+        }
+
+        private func showCoprocessFailure(_ detail: String) {
+            guard let window else { return }
+            let alert = NSAlert()
+            alert.messageText = "The terminal command failed"
+            alert.informativeText = detail
+            alert.beginSheetModal(for: window)
+        }
+
         deinit {
+            for coprocess in coprocesses.values { coprocess.cancel() }
+
             // Resolve clipboard callback state while surfaceModel is still
             // alive. The request's weak SurfaceView reference is already nil
             // during deinit, so didSet passes this instance explicitly.

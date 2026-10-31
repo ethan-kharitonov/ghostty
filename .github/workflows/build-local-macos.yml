@@ -58,10 +58,10 @@ jobs:
           ditto "$RUNNER_TEMP/GhosttyDerived/Build/Products/ReleaseLocal/Ghostty.app" zig-out/Ghostty.app
 
       - name: Check terminal and SSH integration
-        run: zig build test -Dtest-filter=tmux -Dtest-filter=SplitTree -Dtest-filter=termio -Dtest-filter=ssh
+        run: zig build test -Dtest-filter=tmux -Dtest-filter=SplitTree -Dtest-filter=termio -Dtest-filter=ssh -Dtest-filter=Binding -Dtest-filter=Action
 
       - name: Check native tmux behavior
-        run: xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal -arch arm64 -derivedDataPath "$RUNNER_TEMP/GhosttyDerived" -resultBundlePath "$RUNNER_TEMP/GhosttyUITests.xcresult" -parallel-testing-enabled NO -only-testing:GhosttyUITests/TmuxControlModeUITests test-without-building
+        run: xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal -arch arm64 -derivedDataPath "$RUNNER_TEMP/GhosttyDerived" -resultBundlePath "$RUNNER_TEMP/GhosttyUITests.xcresult" -parallel-testing-enabled NO -only-testing:GhosttyUITests/TmuxControlModeUITests -only-testing:GhosttyTests/TerminalCoprocessTests test-without-building
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

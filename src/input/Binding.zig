@@ -332,6 +332,13 @@ pub const Action = union(enum) {
     /// the error will currently only show up in logs.
     text: []const u8,
 
+    /// Send one command line to the attached tmux control session.
+    tmux_command: []const u8,
+
+    /// Run a local shell command and send its stdout to this terminal.
+    /// Only supported on macOS. The command receives no stdin.
+    coprocess: []const u8,
+
     /// Send data to the pty depending on whether cursor key mode is enabled
     /// (`application`) or disabled (`normal`).
     cursor_key: CursorKey,
@@ -1302,6 +1309,16 @@ pub const Action = union(enum) {
                     []const u8 => {
                         const idx = colonIdx orelse return Error.InvalidFormat;
                         const param = input[idx + 1 ..];
+                        if (comptime std.mem.eql(u8, field, "tmux_command") or
+                            std.mem.eql(u8, field, "coprocess"))
+                        {
+                            if (param.len == 0 or std.mem.indexOfScalar(u8, param, 0) != null or
+                                !std.unicode.utf8ValidateSlice(param)) return Error.InvalidFormat;
+                        }
+                        if (comptime std.mem.eql(u8, field, "tmux_command")) {
+                            if (std.mem.indexOfAny(u8, param, "\r\n") != null)
+                                return Error.InvalidFormat;
+                        }
                         return @unionInit(Action, field, param);
                     },
 
@@ -1381,6 +1398,8 @@ pub const Action = union(enum) {
             .csi,
             .esc,
             .text,
+            .tmux_command,
+            .coprocess,
             .cursor_key,
             .search,
             .navigate_search,
@@ -4921,4 +4940,19 @@ test "set: formatEntries leaf_chained with text action" {
         \\
     ;
     try testing.expectEqualStrings(expected, output.written());
+}
+
+test "Action command bindings reject ambiguous command boundaries" {
+    const testing = std.testing;
+    const command = try Action.parse("tmux_command:undo-close");
+    try testing.expectEqualStrings("undo-close", command.tmux_command);
+    try testing.expectError(Error.InvalidFormat, Action.parse("tmux_command:"));
+    try testing.expectError(Error.InvalidFormat, Action.parse("tmux_command:detach\nkill-server"));
+    try testing.expectError(Error.InvalidFormat, Action.parse("tmux_command:detach\rkill-server"));
+    try testing.expectError(Error.InvalidFormat, Action.parse("tmux_command:detach\x00"));
+    try testing.expectError(Error.InvalidFormat, Action.parse("coprocess:"));
+    try testing.expectError(Error.InvalidFormat, Action.parse("coprocess:echo\x00"));
+    try testing.expectError(Error.InvalidFormat, Action.parse("coprocess:\xff"));
+    const coprocess = try Action.parse("coprocess:printf 'hello'; printf '\\026'");
+    try testing.expectEqualStrings("printf 'hello'; printf '\\026'", coprocess.coprocess);
 }

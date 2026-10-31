@@ -2128,6 +2128,19 @@ pub const CAPI = struct {
         return true;
     }
 
+    /// Send bytes unchanged, without clipboard or paste encoding.
+    export fn ghostty_surface_write(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) bool {
+        surface.core_surface.writeInput(ptr[0..len]) catch |err| {
+            log.warn("error writing terminal input err={}", .{err});
+            return false;
+        };
+        return true;
+    }
+
     /// Send raw text to the terminal. This is treated like a paste
     /// so this isn't useful for sending escape sequences. For that,
     /// individual key input should be used.

@@ -603,6 +603,16 @@ extension Ghostty {
 
             // Action dispatch
             switch action.tag {
+            case GHOSTTY_ACTION_COPROCESS:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = surfaceView(from: surface),
+                      let command = action.action.coprocess.command else { return false }
+                let bytes = UnsafeBufferPointer(start: command, count: Int(action.action.coprocess.command_len))
+                guard let text = String(bytes: bytes, encoding: .utf8) else { return false }
+                view.runCoprocess(text)
+                return true
+
             case GHOSTTY_ACTION_TMUX_WINDOW:
                 guard let userdata = ghostty_app_userdata(app),
                       let spec = action.action.tmux_window.spec else { return false }

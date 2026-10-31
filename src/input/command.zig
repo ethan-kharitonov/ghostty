@@ -713,6 +713,8 @@ fn actionCommands(action: Action.Key) []const Command {
         // aren't obvious values users would use. It is possible that
         // these may have commands in the future if there are very
         // common values that users tend to use.
+        .tmux_command,
+        .coprocess,
         .csi,
         .esc,
         .cursor_key,

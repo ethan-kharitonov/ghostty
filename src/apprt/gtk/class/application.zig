@@ -708,6 +708,7 @@ pub const Application = extern struct {
         value: apprt.Action.Value(action),
     ) !bool {
         switch (action) {
+            .coprocess => return false,
             .close_tab => return Action.closeTab(target, value),
             .close_window => return Action.closeWindow(target),
 

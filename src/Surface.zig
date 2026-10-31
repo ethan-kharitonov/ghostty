@@ -3557,6 +3557,11 @@ fn encodeKeyOpts(self: *const Surface) input.key_encode.Options {
     return opts;
 }
 
+/// Send bytes without paste encoding, including framing supplied by a coprocess.
+pub fn writeInput(self: *Surface, bytes: []const u8) !void {
+    self.queueIo(try termio.Message.writeReq(self.alloc, bytes), .unlocked);
+}
+
 /// Sends text as-is to the terminal without triggering any keyboard
 /// protocol. This will treat the input text as if it was pasted
 /// from the clipboard so the same logic will be applied. Namely,
@@ -5679,6 +5684,13 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
     }
 
     switch (action.scoped(.surface).?) {
+        .tmux_command => return false,
+        .coprocess => |command| return try self.rt_app.performAction(
+            .{ .surface = self },
+            .coprocess,
+            .{ .command = command.ptr, .command_len = command.len },
+        ),
+
         .csi, .esc => |data| {
             // We need to send the CSI/ESC sequence as a single write request.
             // If you split it across two then the shell can interpret it

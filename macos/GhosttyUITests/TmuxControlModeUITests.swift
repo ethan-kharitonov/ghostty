@@ -18,6 +18,8 @@ final class TmuxControlModeUITests: XCTestCase {
         confirm-close-surface = false
         window-save-state = never
         auto-update = off
+        keybind = ctrl+shift+u=tmux_command:rename-window Shortcut
+        keybind = ctrl+shift+p=coprocess:printf 'coprocess-input\\n'
         """.write(to: config, atomically: true, encoding: .utf8)
         app = XCUIApplication()
         app.launchArguments = [
@@ -29,6 +31,22 @@ final class TmuxControlModeUITests: XCTestCase {
         app?.terminate()
         if socket != nil { _ = try? tmux(["kill-server"]) }
         if let config { try? FileManager.default.removeItem(at: config) }
+    }
+
+    @MainActor
+    func testCustomTmuxCommandRunsOnServer() throws {
+        launchConnectedTerminal()
+        app.typeKey("u", modifierFlags: [.control, .shift])
+        XCTAssertTrue(app.windows["Shortcut"].waitForExistence(timeout: 5))
+        XCTAssertEqual(try tmux(["display-message", "-p", "-t", "native:0", "#{window_name}"]), "Shortcut")
+    }
+
+    @MainActor
+    func testCoprocessSendsLocalOutputToSelectedRemotePane() throws {
+        launchConnectedTerminal()
+        app.typeKey("p", modifierFlags: [.control, .shift])
+        waitForServerOutput(["capture-pane", "-p", "-t", "native:0.1"], equals: "coprocess-input\ncoprocess-input")
+        XCTAssertEqual(try tmux(["capture-pane", "-p", "-t", "native:0.0"]), "")
     }
 
     @MainActor
@@ -125,7 +143,8 @@ final class TmuxControlModeUITests: XCTestCase {
         try process.run()
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let decoded = try XCTUnwrap(String(data: data, encoding: .utf8))
+        let text = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
         guard process.terminationStatus == 0 else {
             throw NSError(domain: "TmuxControlModeUITests", code: Int(process.terminationStatus),
                           userInfo: [NSLocalizedDescriptionKey: text])

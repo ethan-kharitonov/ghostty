@@ -371,6 +371,9 @@ pub const Action = union(Key) {
     /// others, each new surface adopts the next tmux pane instead.
     tmux_window: TmuxWindow,
 
+    /// Run a local coprocess for a surface. The callback borrows the command.
+    coprocess: Coprocess,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -444,6 +447,7 @@ pub const Action = union(Key) {
         move_tab_to_new_window,
         resize_window,
         tmux_window,
+        coprocess,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -1193,6 +1197,12 @@ pub const OpenConfig = enum(c_int) {
     test "ghostty.h OpenConfig" {
         try lib.checkGhosttyHEnum(OpenConfig, "GHOSTTY_ACTION_OPEN_CONFIG_");
     }
+};
+
+/// Sync with ghostty_action_coprocess_s.
+pub const Coprocess = extern struct {
+    command: [*]const u8,
+    command_len: usize,
 };
 
 test {
