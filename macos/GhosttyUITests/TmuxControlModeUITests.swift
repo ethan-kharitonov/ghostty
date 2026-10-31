@@ -22,15 +22,22 @@ final class TmuxControlModeUITests: XCTestCase {
         keybind = ctrl+shift+p=coprocess:printf 'coprocess-input\\n'
         """.write(to: config, atomically: true, encoding: .utf8)
         app = XCUIApplication()
-        app.launchArguments = [
-            "--config-default-files=false", "--config-file=\(config.path)",
-        ]
+        app.launchEnvironment["GHOSTTY_CONFIG_PATH"] = config.path
     }
 
     override func tearDownWithError() throws {
         app?.terminate()
         if socket != nil { _ = try? tmux(["kill-server"]) }
         if let config { try? FileManager.default.removeItem(at: config) }
+    }
+
+    @MainActor
+    func testImportingWindowGroupsPreservesITermMetadata() throws {
+        let metadata = "a_302c7074792d6162633b57696e646f775374796c653d46756c6c53637265656e"
+        try tmux(["set-option", "-t", "native", "@affinities", metadata])
+        launchConnectedTerminal()
+        waitForServerOutput(["show-options", "-v", "-t", "native", "@ghostty-affinities"], equals: "0")
+        XCTAssertEqual(try tmux(["show-options", "-v", "-t", "native", "@affinities"]), metadata)
     }
 
     @MainActor
@@ -209,8 +216,8 @@ final class TmuxControlModeUITests: XCTestCase {
     @MainActor
     private func launchConnectedTerminal() {
         app.launch()
-        XCTAssertTrue(app.windows["First"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.groups["Right pane"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.windows["First"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.groups["Right pane"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
     private func waitForServerOutput(_ arguments: [String], equals expected: String) {

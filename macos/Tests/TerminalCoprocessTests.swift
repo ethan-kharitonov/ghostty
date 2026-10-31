@@ -16,21 +16,25 @@ struct TerminalCoprocessTests {
     }
 
     @Test @MainActor func cancellationStopsTheProcessAndSuppressesFailure() async throws {
-        var child: TerminalCoprocess?
-        var output = Data()
-        let failure: String? = try await withCheckedThrowingContinuation { continuation in
-            do {
-                child = try TerminalCoprocess(command: "printf ready; sleep 10; printf finished") { bytes in
-                    output.append(bytes)
-                    child?.cancel()
-                } completion: { continuation.resume(returning: $0) }
-            } catch {
-                continuation.resume(throwing: error)
+        for command in ["printf ready; sleep 10; printf finished", "trap '' TERM; printf ready; sleep 10; printf finished"] {
+            var child: TerminalCoprocess?
+            var output = Data()
+            let start = ContinuousClock.now
+            let failure: String? = try await withCheckedThrowingContinuation { continuation in
+                do {
+                    child = try TerminalCoprocess(command: command) { bytes in
+                        output.append(bytes)
+                        child?.cancel()
+                    } completion: { continuation.resume(returning: $0) }
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
+            #expect(start.duration(to: .now) < .seconds(3))
+            #expect(failure == nil)
+            #expect(output == Data("ready".utf8))
+            child = nil
         }
-        #expect(failure == nil)
-        #expect(output == Data("ready".utf8))
-        child = nil
     }
 
     @MainActor private func collect(_ command: String) async throws -> (output: Data, failure: String?) {

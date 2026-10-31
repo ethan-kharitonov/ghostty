@@ -53,7 +53,7 @@
 //! yet, so a report that only echoes our own request is not applied
 //! again and a stale one is ignored.
 //!
-//! Which tmux windows share a native window is kept in the `@affinities`
+//! Which tmux windows share a native window is kept in the `@ghostty-affinities`
 //! session option (`syncAffinities`). tmux sends no notification for
 //! `swap-window`, so the viewer subscribes to the window order and the
 //! session lists the windows again after its own reorders.
@@ -128,10 +128,9 @@ pub const Session = struct {
     /// not prompting.
     prompt: ?std.ArrayList(u8) = null,
 
-    /// Native-window grouping of tmux windows, stored in the `@affinities`
-    /// session option (the same option iTerm2 uses, so both clients agree
-    /// on the grouping). Each inner list is the set of tmux window ids
-    /// that share one native window as tabs.
+    /// Native-window grouping of tmux windows, stored in the `@ghostty-affinities`
+    /// session option, initially imported from iTerm2 when unset. Each
+    /// inner list contains the tmux windows sharing one native window.
     affinities: std.ArrayList(std.ArrayList(usize)) = .empty,
 
     /// When the user creates a tab (`new_tab`), the next tmux window
@@ -157,7 +156,7 @@ pub const Session = struct {
     /// when native focus lags behind across windows.
     active_window: ?usize = null,
 
-    /// Last `set @affinities` payload we sent, to avoid spamming tmux.
+    /// Last `set @ghostty-affinities` payload we sent, to avoid spamming tmux.
     last_affinities: ?[]u8 = null,
 
     /// Ghostty's own new_window asked for the next tmux window to get a
@@ -332,7 +331,7 @@ pub const Session = struct {
             _ = self.placed.remove(pane_id);
 
             // Closing the last native surface for a tmux window drops it
-            // from @affinities right away rather than on the next
+            // from @ghostty-affinities right away rather than on the next
             // list-windows, so a tab opened in between can't join it.
             if (window_id) |wid| {
                 if (!self.windowHasSurface(wid)) {
@@ -587,7 +586,7 @@ pub const Session = struct {
     /// Take ownership of a new layout and reconcile the GUI with it.
     /// Must be called on the app thread.
     pub fn applyLayout(self: *Session, snapshot: *Snapshot) void {
-        // Another session (after switch-client) has its own @affinities,
+        // Another session (after switch-client) has its own @ghostty-affinities,
         // so what we know about the old one must not carry over.
         const switched = if (self.layout) |old|
             old.session_id != snapshot.session_id
@@ -609,7 +608,7 @@ pub const Session = struct {
 
         // A session always has a window, so an empty list only means the
         // viewer is switching sessions. Syncing then would save an empty
-        // @affinities into the session we're switching to.
+        // @ghostty-affinities into the session we're switching to.
         if (snapshot.windows.len > 0) self.syncAffinities();
         if (comptime native_layout) {
             // Tabs follow tmux's window order, which some commands change
@@ -639,33 +638,17 @@ pub const Session = struct {
     }
 
     fn loadAffinities(self: *Session, raw: []const u8) void {
-        var groups = std.mem.tokenizeAny(u8, raw, " |");
-        while (groups.next()) |encoded| {
-            const ids_text = if (std.mem.indexOfScalar(u8, encoded, ';')) |i|
-                encoded[0..i]
-            else
-                encoded;
-            var group: std.ArrayList(usize) = .empty;
-            var ids = std.mem.tokenizeScalar(u8, ids_text, ',');
-            while (ids.next()) |id_text| {
-                const id = std.fmt.parseInt(usize, id_text, 10) catch continue;
-                group.append(self.alloc, id) catch {
-                    group.deinit(self.alloc);
-                    return;
-                };
-            }
-            if (group.items.len == 0) {
-                group.deinit(self.alloc);
-                continue;
-            }
-            self.affinities.append(self.alloc, group) catch {
-                group.deinit(self.alloc);
-                return;
-            };
-        }
-        if (self.affinities.items.len > 0) {
-            self.last_affinities = self.alloc.dupe(u8, raw) catch null;
-        }
+        const groups = @import("tmux_affinity.zig").parse(self.alloc, raw) catch |err| {
+            log.warn("failed to read native window groups err={}", .{err});
+            return;
+        };
+        defer self.alloc.free(groups);
+        self.affinities.ensureUnusedCapacity(self.alloc, groups.len) catch |err| {
+            for (groups) |group| self.alloc.free(group);
+            log.warn("failed to store native window groups err={}", .{err});
+            return;
+        };
+        for (groups) |group| self.affinities.appendAssumeCapacity(.fromOwnedSlice(group));
     }
 
     /// Remember which tmux window a forthcoming `new-window` should share
@@ -824,7 +807,7 @@ pub const Session = struct {
         self.sendCommandFmt("select-pane -t %{d}\n", .{pane_id});
     }
 
-    /// Keep `@affinities` in sync with the live window list and persist it.
+    /// Keep `@ghostty-affinities` in sync with the live window list and persist it.
     fn syncAffinities(self: *Session) void {
         const snapshot = self.layout orelse return;
 
@@ -1016,7 +999,7 @@ pub const Session = struct {
         // tmux answers it with a block that would otherwise be taken as
         // the reply to whatever the viewer has in flight. The value only
         // holds digits, commas and spaces, so it needs no escaping.
-        self.sendCommandFmt("set @affinities \"{s}\"\n", .{owned});
+        self.sendCommandFmt("set @ghostty-affinities \"{s}\"\n", .{owned});
     }
 
     fn indexPanes(self: *Session, window_id: usize, node: Layout) void {

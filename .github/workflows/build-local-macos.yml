@@ -53,15 +53,18 @@ jobs:
         run: brew install gettext tmux
 
       - name: Build app and UI tests
+        id: build_app
         run: |
           zig build -Doptimize=fast -Dxcframework-target=native -Demit-macos-app=false
           xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal -arch arm64 -derivedDataPath "$RUNNER_TEMP/GhosttyDerived" ENABLE_TESTABILITY=YES build-for-testing
           ditto "$RUNNER_TEMP/GhosttyDerived/Build/Products/ReleaseLocal/Ghostty.app" zig-out/Ghostty.app
 
       - name: Check terminal and SSH integration
+        id: core_checks
         run: zig build test -Dtest-filter=tmux -Dtest-filter=SplitTree -Dtest-filter=termio -Dtest-filter=ssh -Dtest-filter=Binding -Dtest-filter=Action -Dtest-filter=SessionStatus -Dtest-filter=mouse -Dtest-filter=Config
 
       - name: Check native tmux behavior
+        id: native_checks
         run: xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal -arch arm64 -derivedDataPath "$RUNNER_TEMP/GhosttyDerived" -resultBundlePath "$RUNNER_TEMP/GhosttyUITests.xcresult" -parallel-testing-enabled NO -only-testing:GhosttyUITests/TmuxControlModeUITests -only-testing:GhosttyTests/TerminalCoprocessTests test-without-building
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -81,15 +84,19 @@ jobs:
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Package app
+        if: always() && steps.build_app.outcome == 'success'
         run: |
           git rev-parse HEAD > build-commit.txt
+          printf 'core=%s\nnative=%s\n' '${{ steps.core_checks.outcome }}' '${{ steps.native_checks.outcome }}' > validation-status.txt
           zig-out/Ghostty.app/Contents/MacOS/ghostty --version
           ditto -c -k --keepParent zig-out/Ghostty.app Ghostty-macos-arm64.zip
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.build_app.outcome == 'success'
         with:
           name: Ghostty-macos-arm64
           path: |
             Ghostty-macos-arm64.zip
             build-commit.txt
+            validation-status.txt
           if-no-files-found: error

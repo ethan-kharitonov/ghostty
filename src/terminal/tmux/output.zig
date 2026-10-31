@@ -92,7 +92,7 @@ pub fn format(
         if (variable == .affinities) {
             // Keep this field non-empty when the option is unset. The parser
             // strips the A sentinel below.
-            try writer.writeAll("A#{@affinities}");
+            try writer.writeAll("A#{?@ghostty-affinities,#{@ghostty-affinities},#{@affinities}}");
         } else {
             try writer.print("#{{{t}}}", .{variable});
         }
@@ -122,7 +122,7 @@ pub fn FormatStruct(comptime vars: []const Variable) type {
 /// a subset of them here that are relevant to the use case of implementing
 /// control mode for terminal emulators.
 pub const Variable = enum {
-    /// Native window grouping stored in the `@affinities` session option.
+    /// Native window groups, with iTerm2 groups as the initial fallback.
     affinities,
     /// 1 if pane is in alternate screen.
     alternate_on,
@@ -647,7 +647,7 @@ test "format single variable" {
 }
 
 test "format affinities option" {
-    try testFormat(&.{.affinities}, ' ', "A#{@affinities}");
+    try testFormat(&.{.affinities}, ' ', "A#{?@ghostty-affinities,#{@ghostty-affinities},#{@affinities}}");
 }
 
 test "format multiple variables" {
