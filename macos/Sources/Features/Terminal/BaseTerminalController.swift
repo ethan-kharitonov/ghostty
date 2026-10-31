@@ -1157,6 +1157,10 @@ class BaseTerminalController: NSWindowController,
     }
 
     func fullscreenDidChange() {
+        guard !presentationSuspended else {
+            window?.orderOut(nil)
+            return
+        }
         guard let fullscreenStyle else { return }
 
         // When we enter fullscreen, we want to show the update overlay so that it
@@ -1180,6 +1184,7 @@ class BaseTerminalController: NSWindowController,
             menuExclusionBeforeSuspending = window?.isExcludedFromWindowsMenu ?? false
         }
         window?.isExcludedFromWindowsMenu = true
+        fullscreenStyle?.exit()
         if let window, let group = window.tabGroup, group.windows.count > 1 {
             group.removeWindow(window)
         }
