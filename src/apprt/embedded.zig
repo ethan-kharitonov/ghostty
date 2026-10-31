@@ -28,6 +28,7 @@ const log = std.log.scoped(.embedded_window);
 pub const resourcesDir = internal_os.resourcesDir;
 
 pub const App = struct {
+    pub const tmux_detach_on_quit = true;
     /// Because we only expect the embedding API to be used in embedded
     /// environments, the options are extern so that we can expose it
     /// directly to a C callconv and not pay for any translation costs.
@@ -289,6 +290,11 @@ pub const App = struct {
 
     /// Close the given surface.
     pub fn closeSurface(self: *App, surface: *Surface) void {
+        // The host frees views during layout changes and failed construction,
+        // too. Only explicit tmux actions may terminate a remote program.
+        if (surface.tmuxPane() != null) {
+            if (self.core_app.tmux) |*session| session.releaseSurface(&surface.core_surface);
+        }
         surface.deinit();
         self.core_app.alloc.destroy(surface);
     }
@@ -453,6 +459,7 @@ pub const Surface = struct {
     size: apprt.SurfaceSize,
     cursor_pos: apprt.CursorPos,
     inspector: ?*Inspector = null,
+    tmux_pane: ?apprt.action.TmuxWindow.Pane = null,
 
     /// The current title of the surface. The embedded apprt saves this so
     /// that getTitle works without the implementer needing to save it.
@@ -499,6 +506,10 @@ pub const Surface = struct {
 
         /// Context for the new surface
         context: apprt.surface.NewSurfaceContext = .window,
+
+        tmux_session: u64 = 0,
+        tmux_window: usize = 0,
+        tmux_pane: usize = 0,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -506,6 +517,11 @@ pub const Surface = struct {
             .app = app,
             .platform = try .init(opts.platform_tag, opts.platform),
             .userdata = opts.userdata,
+            .tmux_pane = if (opts.tmux_session != 0) .{
+                .session = opts.tmux_session,
+                .window = opts.tmux_window,
+                .pane = opts.tmux_pane,
+            } else null,
             .core_surface = undefined,
             .content_scale = .{
                 .x = @floatCast(opts.scale_factor),
@@ -1135,6 +1151,14 @@ pub const Surface = struct {
         };
     }
 
+    pub fn tmuxPane(self: *const Surface) ?apprt.action.TmuxWindow.Pane {
+        return self.tmux_pane;
+    }
+
+    pub fn tmuxReparent(self: *Surface, window: usize) void {
+        if (self.tmux_pane) |*pane| pane.window = window;
+    }
+
     /// Paste explicit text into the surface as if it came from the
     /// clipboard, regardless of the actual clipboard contents. Unlike
     /// textCallback, this honors paste protection: unsafe text routes
@@ -1747,6 +1771,10 @@ pub const CAPI = struct {
         core_app.destroy();
     }
 
+    export fn ghostty_app_prepare_quit(v: *App) void {
+        v.core_app.tmuxDetachForQuit();
+    }
+
     /// Update the focused state of the app.
     export fn ghostty_app_set_focus(
         app: *App,
@@ -2104,6 +2132,19 @@ pub const CAPI = struct {
         return true;
     }
 
+    /// Send bytes unchanged, without clipboard or paste encoding.
+    export fn ghostty_surface_write(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) bool {
+        surface.core_surface.writeInput(ptr[0..len]) catch |err| {
+            log.warn("error writing terminal input err={}", .{err});
+            return false;
+        };
+        return true;
+    }
+
     /// Send raw text to the terminal. This is treated like a paste
     /// so this isn't useful for sending escape sequences. For that,
     /// individual key input should be used.
@@ -2268,19 +2309,21 @@ pub const CAPI = struct {
     }
 
     /// Resize the current split by moving the split divider in the given
-    /// direction. `direction` specifies which direction the split divider will
-    /// move relative to the focused split. `amount` is a fractional value
-    /// between 0 and 1 that specifies by how much the divider will move.
+    /// direction. `amount` is the distance in logical pixels.
     export fn ghostty_surface_split_resize(
         ptr: *Surface,
         direction: apprt.action.ResizeSplit.Direction,
         amount: u16,
     ) void {
-        _ = ptr.app.performAction(
-            .{ .surface = &ptr.core_surface },
-            .resize_split,
-            .{ .direction = direction, .amount = amount },
-        ) catch |err| {
+        _ = ptr.core_surface.performBindingAction(.{ .resize_split = .{
+            switch (direction) {
+                .up => .up,
+                .down => .down,
+                .left => .left,
+                .right => .right,
+            },
+            amount,
+        } }) catch |err| {
             log.err("error resizing split err={}", .{err});
             return;
         };
@@ -2288,11 +2331,7 @@ pub const CAPI = struct {
 
     /// Equalize the size of all splits in the current window.
     export fn ghostty_surface_split_equalize(ptr: *Surface) void {
-        _ = ptr.app.performAction(
-            .{ .surface = &ptr.core_surface },
-            .equalize_splits,
-            {},
-        ) catch |err| {
+        _ = ptr.core_surface.performBindingAction(.equalize_splits) catch |err| {
             log.err("error equalizing splits err={}", .{err});
             return;
         };
@@ -2314,6 +2353,178 @@ pub const CAPI = struct {
             log.err("error performing binding action action={f} err={}", .{ action, err });
             return false;
         };
+    }
+
+    const TmuxWindowInfo = extern struct {
+        session: u64,
+        window: usize,
+        serial: u64,
+        node_count: usize,
+        zoomed: i32,
+        focused: i32,
+        title: [*:0]const u8,
+        has_beside: bool,
+        beside: usize,
+        has_after: bool,
+        after: usize,
+        select: bool,
+        present: bool,
+        parent: ?*Surface,
+    };
+
+    const TmuxNode = extern struct {
+        split: bool = false,
+        pane: usize = 0,
+        surface: ?*Surface = null,
+        horizontal: bool = false,
+        ratio: f64 = 0,
+        left: u16 = 0,
+        right: u16 = 0,
+    };
+
+    export fn ghostty_tmux_window_at(batch: apprt.action.TmuxWindow.C, index: usize) ?*const apprt.action.TmuxWindow.Spec {
+        if (index >= batch.count) return null;
+        const specs: [*]const apprt.action.TmuxWindow.Spec = @ptrCast(@alignCast(batch.specs));
+        return &specs[index];
+    }
+
+    export fn ghostty_tmux_window_info(spec: *const apprt.action.TmuxWindow.Spec) TmuxWindowInfo {
+        return .{
+            .session = spec.session,
+            .window = spec.window,
+            .serial = spec.serial,
+            .node_count = spec.nodes.len,
+            .zoomed = if (spec.zoomed) |v| v else -1,
+            .focused = if (spec.focused) |v| v else -1,
+            .title = spec.title,
+            .has_beside = spec.beside != null,
+            .beside = spec.beside orelse 0,
+            .has_after = spec.after != null,
+            .after = spec.after orelse 0,
+            .select = spec.select,
+            .present = spec.present,
+            .parent = if (spec.parent) |v| v.rt_surface else null,
+        };
+    }
+
+    export fn ghostty_tmux_window_node(
+        spec: *const apprt.action.TmuxWindow.Spec,
+        index: usize,
+        node: *TmuxNode,
+    ) bool {
+        if (index >= spec.nodes.len) return false;
+        node.* = switch (spec.nodes[index]) {
+            .leaf => |v| .{
+                .pane = v.pane,
+                .surface = if (v.surface) |surface| surface.rt_surface else null,
+            },
+            .split => |v| .{
+                .split = true,
+                .horizontal = v.layout == .horizontal,
+                .ratio = v.ratio,
+                .left = v.left,
+                .right = v.right,
+            },
+        };
+        return true;
+    }
+
+    /// Handle a native menu action only when tmux owns it. Unlike
+    /// binding_action, false means the host should perform its normal action.
+    export fn ghostty_surface_tmux_binding_action(
+        surface: *Surface,
+        action_ptr: [*]const u8,
+        action_len: usize,
+    ) bool {
+        const action = input.Binding.Action.parse(action_ptr[0..action_len]) catch return false;
+        return surface.core_surface.tmuxBindingAction(action) catch |err| {
+            log.err("error performing tmux action err={}", .{err});
+            return false;
+        };
+    }
+
+    export fn ghostty_surface_tmux_select(surface: *Surface, session: u64, window: usize) bool {
+        return surface.core_surface.tmuxNativeEvent(.{ .tab_selected = .{
+            .session = session,
+            .window = window,
+        } });
+    }
+
+    export fn ghostty_surface_tmux_close(surface: *Surface, session: u64, window: usize) bool {
+        return surface.core_surface.tmuxNativeEvent(.{ .close_tab = .{
+            .session = session,
+            .window = window,
+        } });
+    }
+
+    export fn ghostty_surface_tmux_close_pane(surface: *Surface, session: u64) bool {
+        return surface.core_surface.tmuxNativeEvent(.{ .close_pane = session });
+    }
+
+    export fn ghostty_surface_tmux_size(
+        surface: *Surface,
+        session: u64,
+        window: usize,
+        width: u32,
+        height: u32,
+    ) bool {
+        return surface.core_surface.tmuxNativeEvent(.{ .view_size = .{
+            .tab = .{ .session = session, .window = window },
+            .width = width,
+            .height = height,
+        } });
+    }
+
+    export fn ghostty_surface_tmux_resize_split(
+        surface: *Surface,
+        session: u64,
+        window: usize,
+        serial: u64,
+        handle: u16,
+        ratio: f64,
+    ) bool {
+        return surface.core_surface.tmuxNativeEvent(.{ .split_ratio = .{
+            .tab = .{ .session = session, .window = window },
+            .serial = serial,
+            .handle = handle,
+            .ratio = ratio,
+        } });
+    }
+
+    export fn ghostty_surface_tmux_reorder(
+        surface: *Surface,
+        session: u64,
+        windows: [*]const usize,
+        count: usize,
+    ) bool {
+        return surface.core_surface.tmuxNativeEvent(.{ .reorder = .{
+            .session = session,
+            .windows = windows[0..count],
+        } });
+    }
+
+    export fn ghostty_surface_tmux_regroup(
+        surface: *Surface,
+        session: u64,
+        window: usize,
+        has_beside: bool,
+        beside: usize,
+    ) bool {
+        return surface.core_surface.tmuxNativeEvent(.{ .regroup = .{
+            .tab = .{ .session = session, .window = window },
+            .beside = if (has_beside) beside else null,
+        } });
+    }
+
+    export fn ghostty_surface_tmux_move_pane(
+        destination: *Surface,
+        source: *Surface,
+        direction: apprt.action.SplitDirection,
+    ) bool {
+        return destination.core_surface.tmuxNativeEvent(.{ .move_pane = .{
+            .source = &source.core_surface,
+            .direction = direction,
+        } });
     }
 
     /// Complete a clipboard read request started via the read callback

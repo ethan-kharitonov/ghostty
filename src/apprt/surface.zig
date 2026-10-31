@@ -140,6 +140,13 @@ pub const Message = union(enum) {
     /// Report the progress of an action using a GUI element
     progress_report: terminal.osc.Command.ProgressReport,
 
+    session_status: union(enum) {
+        iterm: WriteReq,
+        program: struct { state: terminal.osc.program_status.State, body: WriteReq },
+        reset,
+        end_command,
+    },
+
     /// A command has started in the shell, start a timer.
     start_command,
 
@@ -159,6 +166,67 @@ pub const Message = union(enum) {
 
     /// Renderer pushed a new frame, redraw this surface.
     redraw,
+
+    /// This surface saw DCS 1000p and is now the tmux control mode
+    /// gateway.
+    tmux_enter: void,
+
+    /// The tmux window/pane layout changed. The receiver takes ownership
+    /// of the snapshot.
+    tmux_windows: *terminal.tmux.Snapshot,
+
+    /// The tmux session's current window changed
+    /// (`%session-window-changed`).
+    tmux_active_window: usize,
+
+    /// The active pane of a tmux window changed (`%window-pane-changed`).
+    /// This alone doesn't make the window the current one.
+    tmux_active_pane: TmuxActivePane,
+
+    /// A tmux window was renamed. The payload is the window id as a
+    /// little-endian u64 followed by the new name. The receiver owns the
+    /// WriteReq memory.
+    tmux_window_renamed: WriteReq,
+
+    /// Owned pane output whose budget is released after parsing or discard.
+    tmux_output: @import("../termio/tmux_output.zig"),
+
+    /// Control mode ended, so the follower surfaces have to go away.
+    tmux_exit: void,
+
+    /// Terminal input from a follower surface that has to be turned into
+    /// `send-keys` for its pane. The receiver owns the WriteReq memory.
+    tmux_send_keys: WriteReq,
+
+    /// A follower surface's grid size changed, so its tmux pane should
+    /// follow.
+    tmux_resize: renderer.GridSize,
+
+    /// Release an owned message that will not reach its surface.
+    pub fn discard(self: Message) void {
+        switch (self) {
+            .session_status => |update| switch (update) {
+                .iterm => |body| body.deinit(),
+                .program => |report| report.body.deinit(),
+                .reset, .end_command => {},
+            },
+            .kitty_clipboard_read => |v| v.destroy(),
+            .kitty_clipboard_write => |v| v.destroy(),
+            .clipboard_write => |v| v.req.deinit(),
+            .tmux_windows => |v| v.destroy(),
+            .tmux_output => |v| v.deinit(),
+            .pwd_change,
+            .tmux_window_renamed,
+            .tmux_send_keys,
+            => |v| v.deinit(),
+            else => {},
+        }
+    }
+
+    pub const TmuxActivePane = struct {
+        window_id: usize,
+        pane_id: usize,
+    };
 
     pub const ReportTitleStyle = enum {
         csi_21_t,

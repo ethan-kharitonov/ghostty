@@ -96,6 +96,15 @@ class BaseTerminalController: NSWindowController,
 
     /// Cancellable for aggregating bell state across all surfaces in this controller.
     private var bellStateCancellable: AnyCancellable?
+    private var sessionStatusCancellable: AnyCancellable?
+    private var menuExclusionBeforeSuspending: Bool?
+    var presentationSuspended: Bool { menuExclusionBeforeSuspending != nil }
+    private var sessionStatus: TerminalStatus? {
+        didSet {
+            Ghostty.logger.info("status controller priority=\(self.sessionStatus?.priority ?? 0) loaded=\(self.isWindowLoaded)")
+            (window as? TerminalWindow)?.sessionStatus = sessionStatus
+        }
+    }
 
     /// Cancellable for clipboard confirmation requests from surfaces in this controller.
     private var clipboardConfirmationCancellable: AnyCancellable?
@@ -141,7 +150,8 @@ class BaseTerminalController: NSWindowController,
 
     init(_ ghostty: Ghostty.App,
          baseConfig base: Ghostty.SurfaceConfiguration? = nil,
-         surfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil
+         surfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
+         focusedSurface initialFocus: Ghostty.SurfaceView? = nil
     ) {
         self.ghostty = ghostty
         self.derivedConfig = DerivedConfig(ghostty.config)
@@ -150,11 +160,14 @@ class BaseTerminalController: NSWindowController,
 
         // Initialize our initial surface.
         guard let ghostty_app = ghostty.app else { preconditionFailure("app must be loaded") }
-        self.surfaceTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: base))
+        let initialTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: base))
+        self.focusedSurface = initialFocus ?? initialTree.root?.leftmostLeaf()
+        self.surfaceTree = initialTree
         Self.updateSurfaceControllers(self, from: .init(), to: surfaceTree)
 
         // Setup our bell state for the window
         setupBellNotificationPublisher()
+        setupSessionStatusPublisher()
         setupClipboardConfirmationPublisher()
 
         // Setup our notifications for behaviors
@@ -446,6 +459,13 @@ class BaseTerminalController: NSWindowController,
             guard response == .alertFirstButtonReturn else { return }
 
             let newTitle = textField.stringValue
+            if let surface = self.focusedSurface?.surface {
+                let action = "set_tab_title:\(newTitle)"
+                let handled = action.withCString {
+                    ghostty_surface_tmux_binding_action(surface, $0, UInt(action.utf8.count))
+                }
+                if handled { return }
+            }
             if newTitle.isEmpty {
                 self.titleOverride = nil
             } else {
@@ -946,6 +966,8 @@ class BaseTerminalController: NSWindowController,
         self.window?.contentResizeIncrements = to
     }
 
+    func terminalSizeDidChange(to: NSSize) {}
+
     func performSplitAction(_ action: TerminalSplitOperation) {
         switch action {
         case .resize(let resize):
@@ -1135,6 +1157,10 @@ class BaseTerminalController: NSWindowController,
     }
 
     func fullscreenDidChange() {
+        guard !presentationSuspended else {
+            suspendPresentation()
+            return
+        }
         guard let fullscreenStyle else { return }
 
         // When we enter fullscreen, we want to show the update overlay so that it
@@ -1150,10 +1176,38 @@ class BaseTerminalController: NSWindowController,
         syncAppearance()
     }
 
+    /// Hide a live connection surface and return whether its replacement should inherit focus.
+    @discardableResult
+    func suspendPresentation() -> Bool {
+        let wasKey = window?.isKeyWindow ?? false
+        if menuExclusionBeforeSuspending == nil {
+            menuExclusionBeforeSuspending = window?.isExcludedFromWindowsMenu ?? false
+        }
+        window?.isExcludedFromWindowsMenu = true
+        fullscreenStyle?.exit()
+        if let window, let group = window.tabGroup, group.windows.count > 1 {
+            group.removeWindow(window)
+        }
+        window?.orderOut(nil)
+        return wasKey
+    }
+
+    func resumePresentation(focus: Bool) {
+        guard let excluded = menuExclusionBeforeSuspending else { return }
+        menuExclusionBeforeSuspending = nil
+        window?.isExcludedFromWindowsMenu = excluded
+        if focus {
+            window?.makeKeyAndOrderFront(nil)
+        } else {
+            window?.orderFront(nil)
+        }
+    }
+
     // MARK: NSWindowController
 
     override func windowDidLoad() {
         super.windowDidLoad()
+        (window as? TerminalWindow)?.sessionStatus = sessionStatus
 
         // Setup our undo manager.
 
@@ -1705,6 +1759,20 @@ extension BaseTerminalController {
                     userInfo: [Notification.Name.terminalWindowHasBellKey: hasBell]
                 )
             }
+    }
+
+    private func setupSessionStatusPublisher() {
+        sessionStatusCancellable = surfaceValuesPublisher(valueKeyPath: \.sessionStatus, publisherKeyPath: \.$sessionStatus)
+            .map { statuses in
+                statuses.max { lhs, rhs in
+                    let left = lhs.value?.priority ?? 0
+                    let right = rhs.value?.priority ?? 0
+                    return left == right ? lhs.key.uuidString < rhs.key.uuidString : left < right
+                }?.value ?? nil
+            }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.sessionStatus = $0 }
     }
 
     /// Creates a publisher for values on all surfaces in this controller's tree.

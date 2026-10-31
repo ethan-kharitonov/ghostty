@@ -64,6 +64,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
+         withFocusedSurface focus: Ghostty.SurfaceView? = nil,
          parent: NSWindow? = nil
     ) {
         // The window we manage is not restorable if we've specified a command
@@ -71,12 +72,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // time of writing this: it'd just restore to a shell in the same directory
         // as the script. We may want to revisit this behavior when we have scrollback
         // restoration.
-        self.restorable = (base?.command ?? "") == ""
+        self.restorable = (base?.command ?? "") == "" && (base?.tmuxSession ?? 0) == 0
 
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)
 
-        super.init(ghostty, baseConfig: base, surfaceTree: tree)
+        super.init(ghostty, baseConfig: base, surfaceTree: tree, focusedSurface: focus)
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -143,6 +144,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Remove all of our notificationcenter subscriptions
         let center = NotificationCenter.default
         center.removeObserver(self)
+    }
+
+    override func suspendPresentation() -> Bool {
+        let pending = pendingInitialPresentation != nil
+        cancelPendingInitialPresentation()
+        return super.suspendPresentation() || pending
     }
 
     private func cancelPendingInitialPresentation() {
@@ -564,6 +571,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // Update our derived config
             self.derivedConfig = DerivedConfig(config)
             syncRestoration(config)
+            syncTabBar()
 
             // If we have no surfaces in our window (is that possible?) then we update
             // our window appearance based on the root config. If we have surfaces, we
@@ -593,6 +601,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// changes, when a window is closed, and when tabs are reordered
     /// with the mouse.
     func relabelTabs() {
+        syncTabBar()
         // We only listen for frame changes if we have more than 1 window,
         // otherwise the accessory view doesn't matter.
         tabListenForFrame = window?.tabbedWindows?.count ?? 0 > 1
@@ -613,6 +622,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
             }
         }
+    }
+
+    private func syncTabBar() {
+        guard isWindowLoaded, let window, window.isVisible,
+              window.styleMask.contains(.titled) else { return }
+        let group = window.tabGroup
+        let visible: Bool
+        switch derivedConfig.windowShowTabBar {
+        case "always": visible = true
+        case "never": visible = false
+        default: visible = (group?.windows.count ?? 1) > 1
+        }
+        if (group?.isTabBarVisible ?? false) != visible { window.toggleTabBar(nil) }
     }
 
     private func fixTabBar() {
@@ -665,6 +687,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Call this last in case it uses any of the properties above.
         window.syncAppearance(surfaceConfig)
+        syncTabBar()
         terminalViewContainer?.ghosttyConfigDidChange(ghostty.config, preferredBackgroundColor: window.preferredBackgroundColor)
     }
 
@@ -1174,6 +1197,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     /// Setup correct window frame before showing the window
     override func showWindow(_ sender: Any?) {
+        guard !presentationSuspended else { return }
         guard let terminalWindow = window as? TerminalWindow else { return }
 
         // Set the initial window position. This must happen after the window
@@ -1722,6 +1746,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let maximize: Bool
         let windowPositionX: Int16?
         let windowPositionY: Int16?
+        let windowShowTabBar: String
 
         init() {
             self.backgroundColor = Color(NSColor.windowBackgroundColor)
@@ -1730,6 +1755,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             self.maximize = false
             self.windowPositionX = nil
             self.windowPositionY = nil
+            self.windowShowTabBar = "auto"
         }
 
         init(_ config: Ghostty.Config) {
@@ -1739,6 +1765,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             self.maximize = config.maximize
             self.windowPositionX = config.windowPositionX
             self.windowPositionY = config.windowPositionY
+            self.windowShowTabBar = config.windowShowTabBar
         }
     }
 }

@@ -518,6 +518,10 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+  // A nonzero session identifies a native tmux pane; no process is spawned.
+  uint64_t tmux_session;
+  uintptr_t tmux_window;
+  uintptr_t tmux_pane;
 } ghostty_surface_config_s;
 
 typedef struct {
@@ -1016,9 +1020,61 @@ typedef enum {
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
   GHOSTTY_ACTION_RESIZE_WINDOW,
+  GHOSTTY_ACTION_TMUX_WINDOW,
+  GHOSTTY_ACTION_COPROCESS,
+  GHOSTTY_ACTION_SESSION_STATUS,
 } ghostty_action_tag_e;
 
+// The batch and all borrowed fields are valid during the action callback.
+typedef struct {
+  const void* specs;
+  uintptr_t count;
+} ghostty_action_tmux_window_s;
+
+typedef struct {
+  const uint8_t* command;
+  uintptr_t command_len;
+} ghostty_action_coprocess_s;
+
+typedef struct {
+  const char* label;
+  const char* detail;
+  uint32_t indicator;
+  uint32_t text_color;
+  uint8_t priority;
+} ghostty_action_session_status_s;
+
+typedef struct {
+  uint64_t session;
+  uintptr_t window;
+  uint64_t serial;
+  uintptr_t node_count;
+  int32_t zoomed;
+  int32_t focused;
+  const char* title;
+  bool has_beside;
+  uintptr_t beside;
+  bool has_after;
+  uintptr_t after;
+  bool select;
+  bool present;
+  ghostty_surface_t parent;
+} ghostty_tmux_window_info_s;
+
+typedef struct {
+  bool split;
+  uintptr_t pane;
+  ghostty_surface_t surface;
+  bool horizontal;
+  double ratio;
+  uint16_t left;
+  uint16_t right;
+} ghostty_tmux_node_s;
+
 typedef union {
+  ghostty_action_tmux_window_s tmux_window;
+  ghostty_action_coprocess_s coprocess;
+  ghostty_action_session_status_s session_status;
   ghostty_action_split_direction_e new_split;
   ghostty_action_fullscreen_e toggle_fullscreen;
   ghostty_action_move_tab_s move_tab;
@@ -1201,6 +1257,7 @@ GHOSTTY_API bool ghostty_surface_key(ghostty_surface_t, ghostty_input_key_s);
 GHOSTTY_API bool ghostty_surface_key_is_binding(ghostty_surface_t,
                                                    ghostty_input_key_s,
                                                    ghostty_binding_flags_e*);
+GHOSTTY_API bool ghostty_surface_write(ghostty_surface_t, const uint8_t*, uintptr_t);
 GHOSTTY_API void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API void ghostty_surface_paste_text(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
@@ -1228,6 +1285,19 @@ GHOSTTY_API void ghostty_surface_split_resize(ghostty_surface_t,
                                                  uint16_t);
 GHOSTTY_API void ghostty_surface_split_equalize(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_binding_action(ghostty_surface_t, const char*, uintptr_t);
+GHOSTTY_API const void* ghostty_tmux_window_at(ghostty_action_tmux_window_s, uintptr_t);
+GHOSTTY_API ghostty_tmux_window_info_s ghostty_tmux_window_info(const void*);
+GHOSTTY_API void ghostty_app_prepare_quit(ghostty_app_t);
+GHOSTTY_API bool ghostty_tmux_window_node(const void*, uintptr_t, ghostty_tmux_node_s*);
+GHOSTTY_API bool ghostty_surface_tmux_binding_action(ghostty_surface_t, const char*, uintptr_t);
+GHOSTTY_API bool ghostty_surface_tmux_select(ghostty_surface_t, uint64_t, uintptr_t);
+GHOSTTY_API bool ghostty_surface_tmux_close(ghostty_surface_t, uint64_t, uintptr_t);
+GHOSTTY_API bool ghostty_surface_tmux_close_pane(ghostty_surface_t, uint64_t);
+GHOSTTY_API bool ghostty_surface_tmux_size(ghostty_surface_t, uint64_t, uintptr_t, uint32_t, uint32_t);
+GHOSTTY_API bool ghostty_surface_tmux_resize_split(ghostty_surface_t, uint64_t, uintptr_t, uint64_t, uint16_t, double);
+GHOSTTY_API bool ghostty_surface_tmux_reorder(ghostty_surface_t, uint64_t, const uintptr_t*, uintptr_t);
+GHOSTTY_API bool ghostty_surface_tmux_regroup(ghostty_surface_t, uint64_t, uintptr_t, bool, uintptr_t);
+GHOSTTY_API bool ghostty_surface_tmux_move_pane(ghostty_surface_t, ghostty_surface_t, ghostty_action_split_direction_e);
 GHOSTTY_API void ghostty_surface_complete_clipboard_request(
     ghostty_surface_t,
     const ghostty_clipboard_complete_s*,

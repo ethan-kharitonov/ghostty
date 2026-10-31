@@ -4,24 +4,30 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Branch or commit to build
+        description: Branch or full commit SHA to build
         required: true
         default: main
+      inspect_run:
+        description: Inspect an existing test run instead of building
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: local-macos-${{ inputs.source_ref }}
+  group: local-macos-${{ inputs.source_ref }}-${{ inputs.inspect_run }}
   cancel-in-progress: true
 
 jobs:
   build:
+    if: inputs.inspect_run == ''
     runs-on: xcode-27
-    # Upstream's app build took 302 seconds in run 41125246998. Allow
-    # another build for the debug tests, with a 25 percent margin.
-    timeout-minutes: 13
+    # Run 41156429914 took 694s to build, 212s for core tests, and 32s
+    # to save caches. Include UI execution and a 25 percent margin.
+    timeout-minutes: 22
     env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-global-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,15 +52,53 @@ jobs:
           key: macos-arm64-zig-0.17.0-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}
           restore-keys: |
             macos-arm64-zig-0.17.0-${{ hashFiles('build.zig.zon') }}-
+            macos-arm64-zig-0.17.0-
 
       - name: Install build dependencies
-        run: brew install gettext
+        run: brew install gettext tmux
 
-      - name: Build app
-        run: zig build -Doptimize=fast -Dxcframework-target=native
+      - name: Check changed Swift code
+        run: |
+          curl --fail --location https://github.com/realm/SwiftLint/releases/download/0.65.1/portable_swiftlint.zip -o "$RUNNER_TEMP/swiftlint.zip"
+          printf '%s  %s\n' c1e429b0599cf1b516f369a2d9ec04eaf0e436f3c12b637df8851fa52ff694d0 "$RUNNER_TEMP/swiftlint.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/swiftlint.zip" -d "$RUNNER_TEMP/swiftlint"
+          git fetch --no-tags --depth=1 origin main
+          export DYLD_FRAMEWORK_PATH="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          python3 - "$RUNNER_TEMP/swiftlint/swiftlint" <<'PYTHON'
+          import os, subprocess, sys
+          changed = subprocess.check_output(["git", "diff", "--name-only", "--diff-filter=ACM", "-z", "FETCH_HEAD", "HEAD", "--", "*.swift"])
+          paths = [os.fsdecode(path) for path in changed.split(b"\0") if path]
+          if paths:
+              subprocess.run([sys.argv[1], "lint", "--strict", *paths], check=True)
+          PYTHON
 
-      - name: Check tmux integration
-        run: zig build test -Dtest-filter=tmux -Dtest-filter=SplitTree -Dtest-filter=termio
+      - name: Build app and UI tests
+        id: build_app
+        run: |
+          zig build -Doptimize=fast -Dxcframework-target=native -Demit-macos-app=false
+          xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal -arch arm64 -derivedDataPath "$RUNNER_TEMP/GhosttyDerived" ENABLE_TESTABILITY=YES build-for-testing
+          ditto "$RUNNER_TEMP/GhosttyDerived/Build/Products/ReleaseLocal/Ghostty.app" zig-out/Ghostty.app
+
+      - name: Check terminal and SSH integration
+        id: core_checks
+        run: zig build test -Dtest-filter=tmux -Dtest-filter=SplitTree -Dtest-filter=termio -Dtest-filter=ssh -Dtest-filter=Binding -Dtest-filter=Action -Dtest-filter=SessionStatus -Dtest-filter=mouse -Dtest-filter=Config
+
+      - name: Check native tmux behavior
+        id: native_checks
+        run: xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal -arch arm64 -derivedDataPath "$RUNNER_TEMP/GhosttyDerived" -resultBundlePath "$RUNNER_TEMP/GhosttyUITests.xcresult" -parallel-testing-enabled NO -only-testing:GhosttyUITests/TmuxControlModeUITests -only-testing:GhosttyTests/TerminalCoprocessTests test-without-building
+
+      - name: Collect terminal diagnostics
+        if: always() && steps.build_app.outcome == 'success'
+        run: /usr/bin/log show --last 15m --style compact --info --debug --predicate 'process == "ghostty"' > "$RUNNER_TEMP/ghostty-terminal.log"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: Ghostty-tmux-ui-results
+          path: |
+            ${{ runner.temp }}/GhosttyUITests.xcresult
+            ${{ runner.temp }}/ghostty-terminal.log
+          if-no-files-found: ignore
 
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: always()
@@ -66,15 +110,61 @@ jobs:
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Package app
+        if: always() && steps.build_app.outcome == 'success'
         run: |
           git rev-parse HEAD > build-commit.txt
+          printf 'core=%s\nnative=%s\n' '${{ steps.core_checks.outcome }}' '${{ steps.native_checks.outcome }}' > validation-status.txt
           zig-out/Ghostty.app/Contents/MacOS/ghostty --version
           ditto -c -k --keepParent zig-out/Ghostty.app Ghostty-macos-arm64.zip
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.build_app.outcome == 'success'
         with:
           name: Ghostty-macos-arm64
           path: |
             Ghostty-macos-arm64.zip
             build-commit.txt
+            validation-status.txt
+          if-no-files-found: error
+
+  inspect:
+    if: inputs.inspect_run != ''
+    runs-on: xcode-27
+    # The 29MB app artifact downloaded and extracted in 12 seconds.
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN: ${{ inputs.inspect_run }}
+    steps:
+      - name: Read native test diagnostics
+        run: |
+          gh run download "$SOURCE_RUN" -R "$GITHUB_REPOSITORY" -n Ghostty-tmux-ui-results -D "$RUNNER_TEMP/results"
+          if [ -f "$RUNNER_TEMP/results/Info.plist" ]; then
+            mv "$RUNNER_TEMP/results" "$RUNNER_TEMP/inspection.xcresult"
+          else
+            mv "$RUNNER_TEMP/results/GhosttyUITests.xcresult" "$RUNNER_TEMP/inspection.xcresult"
+          fi
+          xcrun xcresulttool get test-results tests --path "$RUNNER_TEMP/inspection.xcresult" > "$RUNNER_TEMP/summary.json"
+          xcrun xcresulttool export diagnostics --path "$RUNNER_TEMP/inspection.xcresult" --output-path "$RUNNER_TEMP/diagnostics"
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/inspection.xcresult" --output-path "$RUNNER_TEMP/attachments" --only-failures
+          python3 - "$RUNNER_TEMP" <<'PYTHON'
+          import pathlib, subprocess, sys
+          root = pathlib.Path(sys.argv[1])
+          predicate = 'process == "ghostty"'
+          for index, archive in enumerate((root / "diagnostics").rglob("*.logarchive")):
+              with (root / f"terminal-{index}.log").open("w") as output:
+                  subprocess.run(["/usr/bin/log", "show", "--archive", str(archive), "--style", "compact", "--info", "--debug", "--predicate", predicate], stdout=output, check=True)
+          PYTHON
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: Ghostty-inspected-results
+          path: |
+            ${{ runner.temp }}/summary.json
+            ${{ runner.temp }}/terminal-*.log
+            ${{ runner.temp }}/attachments
           if-no-files-found: error

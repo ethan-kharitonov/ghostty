@@ -234,6 +234,14 @@ extension Ghostty {
             return ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) ? v : nil
         }
 
+        var windowShowTabBar: String {
+            guard let config else { return "auto" }
+            var value: UnsafePointer<CChar>?
+            let key = "window-show-tab-bar"
+            guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)), let value else { return "auto" }
+            return String(cString: value)
+        }
+
         var windowNewTabPosition: String {
             guard let config = self.config else { return "" }
             var v: UnsafePointer<Int8>?
@@ -810,6 +818,7 @@ extension Ghostty.Config {
         static let attention = BellFeatures(rawValue: 1 << 2)
         static let title = BellFeatures(rawValue: 1 << 3)
         static let border = BellFeatures(rawValue: 1 << 4)
+        static let notification = BellFeatures(rawValue: 1 << 5)
 
         static let defaultValue = BellFeatures([.attention, .title])
     }

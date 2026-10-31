@@ -19,6 +19,8 @@ extension Ghostty {
         /// Optional delegate
         weak var delegate: GhosttyAppDelegate?
 
+        private let tmuxWindows = TmuxWindows()
+
         /// The readiness value of the state.
         @Published var readiness: Readiness = .loading
 
@@ -42,6 +44,11 @@ extension Ghostty {
         var needsConfirmQuit: Bool {
             guard let app = app else { return false }
             return ghostty_app_needs_confirm_quit(app)
+        }
+
+        func prepareQuit() {
+            tmuxWindows.isTerminating = true
+            if let app { ghostty_app_prepare_quit(app) }
         }
 
         init(configPath: String? = nil) {
@@ -596,6 +603,29 @@ extension Ghostty {
 
             // Action dispatch
             switch action.tag {
+            case GHOSTTY_ACTION_SESSION_STATUS:
+                Ghostty.logger.info("status callback priority=\(action.action.session_status.priority)")
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = surfaceView(from: surface) else { return false }
+                view.sessionStatus = TerminalStatus(action.action.session_status)
+                return true
+
+            case GHOSTTY_ACTION_COPROCESS:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = surfaceView(from: surface),
+                      let command = action.action.coprocess.command else { return false }
+                let bytes = UnsafeBufferPointer(start: command, count: Int(action.action.coprocess.command_len))
+                guard let text = String(bytes: bytes, encoding: .utf8) else { return false }
+                view.runCoprocess(text)
+                return true
+
+            case GHOSTTY_ACTION_TMUX_WINDOW:
+                guard let userdata = ghostty_app_userdata(app) else { return false }
+                let state = Unmanaged<App>.fromOpaque(userdata).takeUnretainedValue()
+                return state.tmuxWindows.apply(action.action.tmux_window, app: state)
+
             case GHOSTTY_ACTION_QUIT:
                 quit(app)
 
@@ -1209,6 +1239,9 @@ extension Ghostty {
                     name: .ghosttyBellDidRing,
                     object: surfaceView
                 )
+                if appState(fromView: surfaceView)?.config.bellFeatures.contains(.notification) == true {
+                    showDesktopNotification(surfaceView, title: "Terminal bell", body: "A terminal needs your attention.")
+                }
 
             default:
                 assertionFailure()
@@ -1623,19 +1656,18 @@ extension Ghostty {
             body: String,
             requireFocus: Bool = true) {
             let center = UNUserNotificationCenter.current()
-            center.requestAuthorization(options: [.alert, .sound]) { _, error in
+            center.requestAuthorization(options: [.alert, .sound]) { [weak surfaceView] granted, error in
                 if let error = error {
                     Ghostty.logger.error("Error while requesting notification authorization: \(error, privacy: .public)")
                 }
-            }
-
-            center.getNotificationSettings { settings in
-                guard settings.authorizationStatus == .authorized else { return }
-                surfaceView.showUserNotification(
-                    title: title,
-                    body: body,
-                    requireFocus: requireFocus
-                )
+                guard granted else { return }
+                DispatchQueue.main.async { [weak surfaceView] in
+                    surfaceView?.showUserNotification(
+                        title: title,
+                        body: body,
+                        requireFocus: requireFocus
+                    )
+                }
             }
         }
 
