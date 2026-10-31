@@ -1441,6 +1441,7 @@ fn selectionScrollTick(self: *Surface) !void {
 fn publishSessionStatus(self: *Surface) !void {
     var status = try self.session_status.snapshot(self.alloc);
     defer status.deinit();
+    log.info("publishing session status priority={d} label_bytes={d}", .{ status.priority, status.label.len });
     _ = try self.rt_app.performAction(.{ .surface = self }, .session_status, .{
         .label = status.label.ptr,
         .detail = status.detail.ptr,

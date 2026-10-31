@@ -404,6 +404,7 @@ pub const StreamHandler = struct {
             .program_status => try self.programStatus(value),
             .osc_unknown => {
                 if (!value.truncated and std.mem.startsWith(u8, value.content, "21337;")) {
+                    log.info("received iTerm session status follower={}", .{self.tmux_follower});
                     self.surfaceMessageWriter(.{ .session_status = .{
                         .iterm = try apprt.surface.Message.WriteReq.init(self.alloc, value.content[6..]),
                     } });
@@ -518,8 +519,10 @@ pub const StreamHandler = struct {
                     .output => |out| output: {
                         const viewer = self.tmux_viewer orelse break :output;
                         const ready = viewer.canForwardOutput(out.pane_id);
-                        if (std.mem.indexOf(u8, out.data, "]7501;?") != null) {
-                            log.info("program status query pane=%{d} ready={}", .{ out.pane_id, ready });
+                        if (std.mem.indexOf(u8, out.data, "]7501;") != null or
+                            std.mem.indexOf(u8, out.data, "]21337;") != null)
+                        {
+                            log.info("session status output pane=%{d} ready={}", .{ out.pane_id, ready });
                         }
                         if (!ready) break :output;
                         self.tmuxForwardOutput(out.pane_id, out.data, .escaped);
