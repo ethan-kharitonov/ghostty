@@ -17,9 +17,12 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-26
-    # Upstream's macOS build took 302 seconds in run 41125246998.
-    timeout-minutes: 7
+    runs-on: xcode-27
+    # Upstream's app build took 302 seconds in run 41125246998. Allow
+    # another build for the debug tests, with a 25 percent margin.
+    timeout-minutes: 13
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-global-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,11 +36,13 @@ jobs:
           tar -xf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/zig-aarch64-macos-0.17.0" >> "$GITHUB_PATH"
 
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: cache
         with:
           path: |
-            ~/.cache/zig
+            .zig-global-cache
             .zig-cache
+            zig-pkg
           key: macos-arm64-zig-0.17.0-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}
           restore-keys: |
             macos-arm64-zig-0.17.0-${{ hashFiles('build.zig.zon') }}-
@@ -46,10 +51,19 @@ jobs:
         run: brew install gettext
 
       - name: Build app
-        run: zig build -Doptimize=ReleaseFast -Dxcframework-target=native
+        run: zig build -Doptimize=fast -Dxcframework-target=native
 
       - name: Check tmux integration
         run: zig build test -Dtest-filter=tmux -Dtest-filter=SplitTree -Dtest-filter=termio
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: always()
+        with:
+          path: |
+            .zig-global-cache
+            .zig-cache
+            zig-pkg
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Package app
         run: |
