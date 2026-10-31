@@ -6,7 +6,7 @@ const cli_args = @import("args.zig");
 const diagnostics = @import("diagnostics.zig");
 const Action = @import("ghostty.zig").Action;
 const DiskCache = @import("ssh_cache.zig").DiskCache;
-const internal_os = @import("../os/main.zig");
+const Bootstrap = @import("ssh_bootstrap.zig");
 const terminfopkg = @import("../terminfo/main.zig");
 const global = @import("../global.zig");
 
@@ -278,6 +278,12 @@ fn runInner(
     } = session: {
         if (!opts.terminfo) break :session .{ .term = "xterm-256color" };
 
+        var bootstrap = (terminfoBootstrap(alloc, opts) catch |err| {
+            warnPrint(stderr, "could not prepare terminfo installation: {t}", .{err});
+            break :session .{ .term = "xterm-256color" };
+        }) orelse break :session .{ .term = "xterm-256color" };
+        defer bootstrap.deinit();
+
         const dest = resolveDestination(alloc, opts.ssh, opts._ssh_args.items) orelse {
             warnPrint(stderr, "could not resolve ssh destination; skipping terminfo install", .{});
             break :session .{ .term = "xterm-256color" };
@@ -286,7 +292,7 @@ fn runInner(
         const cache: ?DiskCache = if (opts.cache) cache: {
             const path = DiskCache.defaultPath(alloc, "ghostty") catch |err| {
                 warnPrint(stderr, "ghostty terminfo cache unavailable: {t}", .{err});
-                break :session .{ .term = "xterm-256color" };
+                break :cache null;
             };
             break :cache .{ .path = path };
         } else null;
@@ -317,8 +323,8 @@ fn runInner(
 
         stderr.print("Setting up xterm-ghostty terminfo on {s}...\n", .{dest}) catch {};
         stderr.flush() catch {};
-
-        installRemoteTerminfo(alloc, opts, stderr) catch |err| {
+        verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = bootstrap.argv }});
+        installRemoteTerminfo(alloc, &bootstrap) catch |err| {
             warnPrint(stderr, "failed to install terminfo: {t}", .{err});
             break :session .{ .term = "xterm-256color" };
         };
@@ -529,29 +535,7 @@ fn parseDestination(alloc: Allocator, stdout: []const u8) ?[]const u8 {
     return alloc.print("{s}@{s}:{s}", .{ user, host, port }) catch null;
 }
 
-/// Install Ghostty's terminfo on the remote host over a short-lived SSH
-/// ControlMaster connection. The master tears down with the client
-/// (`ControlPersist=no`) so no socket lingers.
-fn installRemoteTerminfo(
-    alloc: Allocator,
-    opts: *const Options,
-    stderr: *std.Io.Writer,
-) !void {
-    var buf: std.Io.Writer.Allocating = .init(alloc);
-    defer buf.deinit();
-    try terminfopkg.ghostty.encode(&buf.writer);
-    const terminfo = buf.written();
-
-    // ControlPath is in TMPDIR with a short, random basename. ssh uses
-    // ControlPath as the bind address for a Unix domain socket; macOS
-    // limits sockaddr_un.sun_path to ~104 bytes, so keeping the path
-    // short leaves margin.
-    const control_path = try internal_os.randomTmpPath(alloc, "ghostty-ssh-");
-    const control_path_opt = try alloc.print(
-        "ControlPath={s}",
-        .{control_path},
-    );
-
+fn terminfoBootstrap(alloc: Allocator, opts: *const Options) !?Bootstrap {
     // Keep SSH authentication messages visible, including keyboard-interactive
     // instructions while stdin carries terminfo. Only remote installer stderr
     // is suppressed unless --verbose.
@@ -565,24 +549,18 @@ fn installRemoteTerminfo(
         \\exit 1
     ;
 
-    // Set up an SSH ControlMaster scoped to this single install:
-    //   - ControlMaster=yes makes our client also act as the master.
-    //   - ControlPersist=no tears the master down when our client
-    //     exits; no socket lingers on the remote side.
-    const argv = try std.mem.concat(alloc, []const u8, &.{
-        &.{opts.ssh},
-        &.{
-            "-o", "ControlMaster=yes",
-            "-o", "ControlPersist=no",
-            "-o", control_path_opt,
-        },
-        opts._ssh_args.items,
-        &.{remote_script},
-    });
-    verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
+    return Bootstrap.init(alloc, opts.ssh, opts._ssh_args.items, remote_script);
+}
+
+/// Feed the terminal definition to the isolated SSH installation command.
+fn installRemoteTerminfo(alloc: Allocator, bootstrap: *const Bootstrap) !void {
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    try terminfopkg.ghostty.encode(&buf.writer);
+    const terminfo = buf.written();
 
     var child = std.process.spawn(global.io(), .{
-        .argv = argv,
+        .argv = bootstrap.argv,
         .stdin = .pipe,
         .stdout = .ignore,
         .stderr = .inherit,
