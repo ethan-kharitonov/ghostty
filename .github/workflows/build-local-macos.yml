@@ -89,7 +89,7 @@ jobs:
 
       - name: Collect terminal diagnostics
         if: always() && steps.build_app.outcome == 'success'
-        run: /usr/bin/log show --last 15m --style compact --info --debug --predicate 'process == "ghostty" AND (eventMessage CONTAINS "program status" OR eventMessage CONTAINS "tmux presentation" OR eventMessage CONTAINS "snapshot failed" OR eventMessage CONTAINS "pane state" OR eventMessage CONTAINS "backpressure")' > "$RUNNER_TEMP/ghostty-terminal.log"
+        run: /usr/bin/log show --last 15m --style compact --info --debug --predicate 'process == "ghostty"' > "$RUNNER_TEMP/ghostty-terminal.log"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
@@ -153,7 +153,7 @@ jobs:
           python3 - "$RUNNER_TEMP" <<'PYTHON'
           import pathlib, subprocess, sys
           root = pathlib.Path(sys.argv[1])
-          predicate = 'process == "ghostty" AND (eventMessage CONTAINS "program status" OR eventMessage CONTAINS "tmux presentation" OR eventMessage CONTAINS "snapshot failed" OR eventMessage CONTAINS "pane state")'
+          predicate = 'process == "ghostty"'
           for index, archive in enumerate((root / "diagnostics").rglob("*.logarchive")):
               with (root / f"terminal-{index}.log").open("w") as output:
                   subprocess.run(["/usr/bin/log", "show", "--archive", str(archive), "--style", "compact", "--info", "--debug", "--predicate", predicate], stdout=output, check=True)
