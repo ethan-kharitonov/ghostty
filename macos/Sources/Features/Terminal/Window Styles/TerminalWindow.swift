@@ -18,6 +18,11 @@ class TerminalWindow: NSWindow {
 
     /// The view model for SwiftUI views
     private var viewModel = ViewModel()
+    private let sessionStatusView = TerminalStatusView()
+
+    var sessionStatus: TerminalStatus? {
+        didSet { sessionStatusView.status = sessionStatus }
+    }
 
     /// Reset split zoom button in titlebar
     private let resetZoomAccessory = NSTitlebarAccessoryViewController()
@@ -167,6 +172,7 @@ class TerminalWindow: NSWindow {
         stackView.spacing = 4
         stackView.alignment = .centerY
         stackView.addArrangedSubview(tabColorIndicator)
+        stackView.addArrangedSubview(sessionStatusView)
         stackView.addArrangedSubview(keyEquivalentLabel)
         stackView.addArrangedSubview(resetZoomTabButton)
         tab.accessoryView = stackView
@@ -177,8 +183,10 @@ class TerminalWindow: NSWindow {
 
     // Both of these must be true for windows without decorations to be able to
     // still become key/main and receive events.
-    override var canBecomeKey: Bool { return true }
-    override var canBecomeMain: Bool { return true }
+    override var canBecomeKey: Bool {
+        !((windowController as? BaseTerminalController)?.presentationSuspended ?? false)
+    }
+    override var canBecomeMain: Bool { canBecomeKey }
 
     override func sendEvent(_ event: NSEvent) {
         if tabTitleEditor.handleMouseDown(event) {

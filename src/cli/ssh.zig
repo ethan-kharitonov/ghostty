@@ -6,7 +6,7 @@ const cli_args = @import("args.zig");
 const diagnostics = @import("diagnostics.zig");
 const Action = @import("ghostty.zig").Action;
 const DiskCache = @import("ssh_cache.zig").DiskCache;
-const internal_os = @import("../os/main.zig");
+const Bootstrap = @import("ssh_bootstrap.zig");
 const terminfopkg = @import("../terminfo/main.zig");
 const global = @import("../global.zig");
 
@@ -20,6 +20,7 @@ const usage =
     \\  --terminfo[=bool]     Install Ghostty terminfo on first connect. Default: true.
     \\  --cache[=bool]        Use the terminfo install cache. Default: true.
     \\  --ssh=<path>          Path to the ssh binary. Default: first `ssh` on PATH.
+    \\  --reconnect[=bool]    Retry SSH exit status 255 after two seconds. Default: false.
     \\  --verbose             Print +ssh status lines to stderr.
     \\  --help                Show full help.
     \\
@@ -49,6 +50,9 @@ pub const Options = struct {
 
     /// When true, print verbose output to stderr.
     verbose: bool = false,
+
+    /// Retry connection failures for reconnectable sessions such as tmux.
+    reconnect: bool = false,
 
     /// Arguments passed through to `ssh` verbatim. Populated by
     /// `parseManuallyHook` when we reach the first non-flag argument (or
@@ -184,6 +188,10 @@ pub const Options = struct {
 ///   * `--ssh=<path>`: Path to the `ssh` binary to execute. Default: the
 ///     first `ssh` found on `PATH`.
 ///
+///   * `--reconnect=<bool>`: Retry when ssh exits with status 255, after a
+///     two-second pause. A normal detach, other exit status, or signal stops
+///     the command. Intended for reconnectable sessions such as tmux.
+///
 ///   * `--verbose`: Print +ssh status lines to stderr, and surface
 ///     remote stderr during the terminfo install.
 ///
@@ -278,6 +286,12 @@ fn runInner(
     } = session: {
         if (!opts.terminfo) break :session .{ .term = "xterm-256color" };
 
+        var bootstrap = (terminfoBootstrap(alloc, opts) catch |err| {
+            warnPrint(stderr, "could not prepare terminfo installation: {t}", .{err});
+            break :session .{ .term = "xterm-256color" };
+        }) orelse break :session .{ .term = "xterm-256color" };
+        defer bootstrap.deinit();
+
         const dest = resolveDestination(alloc, opts.ssh, opts._ssh_args.items) orelse {
             warnPrint(stderr, "could not resolve ssh destination; skipping terminfo install", .{});
             break :session .{ .term = "xterm-256color" };
@@ -286,7 +300,7 @@ fn runInner(
         const cache: ?DiskCache = if (opts.cache) cache: {
             const path = DiskCache.defaultPath(alloc, "ghostty") catch |err| {
                 warnPrint(stderr, "ghostty terminfo cache unavailable: {t}", .{err});
-                break :session .{ .term = "xterm-256color" };
+                break :cache null;
             };
             break :cache .{ .path = path };
         } else null;
@@ -317,8 +331,8 @@ fn runInner(
 
         stderr.print("Setting up xterm-ghostty terminfo on {s}...\n", .{dest}) catch {};
         stderr.flush() catch {};
-
-        installRemoteTerminfo(alloc, opts, stderr) catch |err| {
+        verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = bootstrap.argv }});
+        installRemoteTerminfo(alloc, &bootstrap) catch |err| {
             warnPrint(stderr, "failed to install terminfo: {t}", .{err});
             break :session .{ .term = "xterm-256color" };
         };
@@ -357,11 +371,17 @@ fn runInner(
     });
     verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
 
-    const exit_code = childExec(argv, if (environ_map) |*m| m else null) catch |err| {
-        try stderr.print("Error: failed to run {s}: {t}\n", .{ argv[0], err });
-        return 1;
+    const exit_code = while (true) {
+        const code = childExec(argv, if (environ_map) |*m| m else null) catch |err| {
+            try stderr.print("Error: failed to run {s}: {t}\n", .{ argv[0], err });
+            return 1;
+        };
+        verbosePrint(opts, stderr, "exit: {d}", .{code});
+        if (!opts.reconnect or code != 255) break code;
+        try stderr.writeAll("Connection lost. Reconnecting…\r\n");
+        try stderr.flush();
+        try std.Io.sleep(global.io(), .fromSeconds(2), .awake);
     };
-    verbosePrint(opts, stderr, "exit: {d}", .{exit_code});
 
     // Attempt to cache (if needed) on a successful ssh execution.
     if (exit_code == 0) if (session.to_cache) |entry| {
@@ -529,29 +549,7 @@ fn parseDestination(alloc: Allocator, stdout: []const u8) ?[]const u8 {
     return alloc.print("{s}@{s}:{s}", .{ user, host, port }) catch null;
 }
 
-/// Install Ghostty's terminfo on the remote host over a short-lived SSH
-/// ControlMaster connection. The master tears down with the client
-/// (`ControlPersist=no`) so no socket lingers.
-fn installRemoteTerminfo(
-    alloc: Allocator,
-    opts: *const Options,
-    stderr: *std.Io.Writer,
-) !void {
-    var buf: std.Io.Writer.Allocating = .init(alloc);
-    defer buf.deinit();
-    try terminfopkg.ghostty.encode(&buf.writer);
-    const terminfo = buf.written();
-
-    // ControlPath is in TMPDIR with a short, random basename. ssh uses
-    // ControlPath as the bind address for a Unix domain socket; macOS
-    // limits sockaddr_un.sun_path to ~104 bytes, so keeping the path
-    // short leaves margin.
-    const control_path = try internal_os.randomTmpPath(alloc, "ghostty-ssh-");
-    const control_path_opt = try alloc.print(
-        "ControlPath={s}",
-        .{control_path},
-    );
-
+fn terminfoBootstrap(alloc: Allocator, opts: *const Options) !?Bootstrap {
     // Keep SSH authentication messages visible, including keyboard-interactive
     // instructions while stdin carries terminfo. Only remote installer stderr
     // is suppressed unless --verbose.
@@ -565,24 +563,18 @@ fn installRemoteTerminfo(
         \\exit 1
     ;
 
-    // Set up an SSH ControlMaster scoped to this single install:
-    //   - ControlMaster=yes makes our client also act as the master.
-    //   - ControlPersist=no tears the master down when our client
-    //     exits; no socket lingers on the remote side.
-    const argv = try std.mem.concat(alloc, []const u8, &.{
-        &.{opts.ssh},
-        &.{
-            "-o", "ControlMaster=yes",
-            "-o", "ControlPersist=no",
-            "-o", control_path_opt,
-        },
-        opts._ssh_args.items,
-        &.{remote_script},
-    });
-    verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
+    return Bootstrap.init(alloc, opts.ssh, opts._ssh_args.items, remote_script);
+}
+
+/// Feed the terminal definition to the isolated SSH installation command.
+fn installRemoteTerminfo(alloc: Allocator, bootstrap: *const Bootstrap) !void {
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    try terminfopkg.ghostty.encode(&buf.writer);
+    const terminfo = buf.written();
 
     var child = std.process.spawn(global.io(), .{
-        .argv = argv,
+        .argv = bootstrap.argv,
         .stdin = .pipe,
         .stdout = .ignore,
         .stderr = .inherit,
@@ -780,4 +772,32 @@ test "parseDestination: result is a valid cache key" {
         const result = parseDestination(arena.allocator(), stdout).?;
         try testing.expect(DiskCache.isValidCacheKey(result));
     }
+}
+
+test "ssh reconnect retries connection failure and stops at a remote exit" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realPathFileAlloc(global.io(), ".", alloc);
+    defer alloc.free(directory);
+    const marker = try std.fs.path.join(alloc, &.{ directory, "attempt" });
+    defer alloc.free(marker);
+    const arguments = [_][]const u8{
+        "-c",
+        "if [ -f \"$1\" ]; then exit 7; fi; : > \"$1\"; exit 255",
+        "reconnect",
+        marker,
+    };
+    var opts: Options = .{
+        .ssh = "/bin/sh",
+        .terminfo = false,
+        .@"forward-env" = false,
+        .reconnect = true,
+    };
+    defer opts._ssh_args.deinit(alloc);
+    try opts._ssh_args.appendSlice(alloc, &arguments);
+    var stderr: std.Io.Writer.Allocating = .init(alloc);
+    defer stderr.deinit();
+    try testing.expectEqual(@as(u8, 7), try runInner(alloc, &opts, &stderr.writer));
 }

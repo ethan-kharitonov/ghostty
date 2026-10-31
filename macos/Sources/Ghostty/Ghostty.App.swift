@@ -19,6 +19,8 @@ extension Ghostty {
         /// Optional delegate
         weak var delegate: GhosttyAppDelegate?
 
+        private let tmuxWindows = TmuxWindows()
+
         /// The readiness value of the state.
         @Published var readiness: Readiness = .loading
 
@@ -42,6 +44,11 @@ extension Ghostty {
         var needsConfirmQuit: Bool {
             guard let app = app else { return false }
             return ghostty_app_needs_confirm_quit(app)
+        }
+
+        func prepareQuit() {
+            tmuxWindows.isTerminating = true
+            if let app { ghostty_app_prepare_quit(app) }
         }
 
         init(configPath: String? = nil) {
@@ -596,6 +603,28 @@ extension Ghostty {
 
             // Action dispatch
             switch action.tag {
+            case GHOSTTY_ACTION_SESSION_STATUS:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = surfaceView(from: surface) else { return false }
+                view.sessionStatus = TerminalStatus(action.action.session_status)
+                return true
+
+            case GHOSTTY_ACTION_COPROCESS:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = surfaceView(from: surface),
+                      let command = action.action.coprocess.command else { return false }
+                let bytes = UnsafeBufferPointer(start: command, count: Int(action.action.coprocess.command_len))
+                guard let text = String(bytes: bytes, encoding: .utf8) else { return false }
+                view.runCoprocess(text)
+                return true
+
+            case GHOSTTY_ACTION_TMUX_WINDOW:
+                guard let userdata = ghostty_app_userdata(app) else { return false }
+                let state = Unmanaged<App>.fromOpaque(userdata).takeUnretainedValue()
+                return state.tmuxWindows.apply(action.action.tmux_window, app: state)
+
             case GHOSTTY_ACTION_QUIT:
                 quit(app)
 

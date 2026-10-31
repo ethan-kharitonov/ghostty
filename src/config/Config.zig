@@ -984,6 +984,11 @@ palette: Palette = .{},
 /// action.
 @"mouse-reporting": bool = true,
 
+/// Which events applications receive when mouse reporting is enabled.
+/// `all` reports buttons, motion, and scrolling. `scroll` keeps clicks and
+/// drags available for terminal text selection while reporting wheel events.
+@"mouse-reporting-events": MouseReportingEvents = .all,
+
 /// Multiplier for scrolling distance with the mouse wheel.
 ///
 /// A prefix of `precision:` or `discrete:` can be used to set the multiplier
@@ -2332,7 +2337,6 @@ keybind: Keybinds = .{},
 ///    Never show the tab bar. Tabs are only accessible via the tab
 ///    overview or by keybind actions.
 ///
-/// Currently only supported on Linux (GTK).
 @"window-show-tab-bar": WindowShowTabBar = .auto,
 
 /// Background color for the window titlebar. This only takes effect if
@@ -9382,6 +9386,9 @@ pub const BellFeatures = packed struct {
     title: bool = true,
     border: bool = false,
 };
+
+/// See mouse-reporting-events
+pub const MouseReportingEvents = enum { all, scroll };
 
 /// See mouse-shift-capture
 pub const MouseShiftCapture = enum {

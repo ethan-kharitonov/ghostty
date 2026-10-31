@@ -599,6 +599,10 @@ extension Ghostty {
         /// Context for surface creation
         var context: ghostty_surface_context_e = GHOSTTY_SURFACE_CONTEXT_WINDOW
 
+        var tmuxSession: UInt64 = 0
+        var tmuxWindow: UInt = 0
+        var tmuxPane: UInt = 0
+
         init() {}
 
         init(from config: ghostty_surface_config_s) {
@@ -621,6 +625,9 @@ extension Ghostty {
                 }
             }
             self.context = config.context
+            self.tmuxSession = config.tmux_session
+            self.tmuxWindow = config.tmux_window
+            self.tmuxPane = config.tmux_pane
         }
 
         /// Provides a C-compatible ghostty configuration within a closure. The configuration
@@ -642,6 +649,9 @@ extension Ghostty {
 
             // Set context
             config.context = context
+            config.tmux_session = tmuxSession
+            config.tmux_window = tmuxWindow
+            config.tmux_pane = tmuxPane
 
             // Use withCString to ensure strings remain valid for the duration of the closure
             return try workingDirectory.withCString { cWorkingDir in
