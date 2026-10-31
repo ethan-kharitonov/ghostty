@@ -499,11 +499,11 @@ pub const StreamHandler = struct {
 
                     // Pane output has to reach the follower surface that
                     // mirrors the pane, which lives on the app thread.
-                    .output => |out| self.tmuxForwardOutput(
-                        out.pane_id,
-                        out.data,
-                        .escaped,
-                    ),
+                    .output => |out| output: {
+                        const viewer = self.tmux_viewer orelse break :output;
+                        if (!viewer.canForwardOutput(out.pane_id)) break :output;
+                        self.tmuxForwardOutput(out.pane_id, out.data, .escaped);
+                    },
 
                     else => {},
                 }

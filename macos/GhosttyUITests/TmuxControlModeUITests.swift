@@ -20,9 +20,9 @@ final class TmuxControlModeUITests: XCTestCase {
         auto-update = off
         """.write(to: config, atomically: true, encoding: .utf8)
         app = XCUIApplication()
-        app.launchArguments = ["-ApplePersistenceIgnoreState", "YES"]
-        app.launchEnvironment["GHOSTTY_CONFIG_PATH"] = config.path
-        app.launchEnvironment["GHOSTTY_USER_DEFAULTS_SUITE"] = socket
+        app.launchArguments = [
+            "--config-default-files=false", "--config-file=\(config.path)",
+        ]
     }
 
     override func tearDownWithError() throws {

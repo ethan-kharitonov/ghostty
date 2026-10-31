@@ -163,7 +163,7 @@ const COMMAND_QUEUE_INITIAL = 8;
 /// command queue by position. Two things would break that and are
 /// handled explicitly: blocks tmux writes for hooks (their `%begin`
 /// flags say they aren't ours, see `control.Block.client`) and user
-/// command lines that get any number of blocks (see `Command.User`).
+/// command lines that get any number of blocks (see `Command.Batch`).
 ///
 pub const Viewer = struct {
     /// I/O implementation used for all internal state.
@@ -202,10 +202,11 @@ pub const Viewer = struct {
     /// parsed twice.
     mirror_panes: bool = true,
 
-    /// What `capturePane` gathered so far for the view whose capture is
-    /// in flight. Its replies arrive one right after another, and the
-    /// last one sends the `pane_restore` action.
+    /// Grid and state replies for the in-flight snapshot. The pending-byte
+    /// reply completes it and emits `pane_restore`.
     restore: ?PendingRestore = null,
+
+    pane_outputs: PaneOutputs = .empty,
 
     /// The arena used for the prior action allocated state. This contains
     /// the contents for the actions as well as the actions slice itself.
@@ -216,8 +217,11 @@ pub const Viewer = struct {
     /// errors on single-action returns, especially those such as `.exit`.
     action_single: [1]Action,
 
-    /// Numbers the end markers of user commands. See `Command.User`.
-    user_command_id: u32 = 0,
+    /// Numbers the end markers of command batches.
+    next_command_id: u32 = 0,
+
+    const PaneOutput = struct { window: usize, ready: bool };
+    const PaneOutputs = std.AutoHashMapUnmanaged(usize, PaneOutput);
 
     pub const CommandQueue = CircBuf(Command, undefined);
     pub const PanesMap = std.AutoArrayHashMapUnmanaged(usize, Pane);
@@ -271,6 +275,9 @@ pub const Viewer = struct {
 
             /// The pane's modes, cursor and scroll region.
             state: PaneState,
+
+            /// Bytes tmux has received but has not yet finished parsing.
+            pending: []const u8 = &.{},
         };
 
         pub const ActivePane = struct {
@@ -374,10 +381,12 @@ pub const Viewer = struct {
         pane_id: usize,
         current: []u8 = &.{},
         saved: []u8 = &.{},
+        state: []u8 = &.{},
 
         fn deinit(self: *PendingRestore, alloc: Allocator) void {
             alloc.free(self.current);
             alloc.free(self.saved);
+            alloc.free(self.state);
         }
     };
 
@@ -436,6 +445,7 @@ pub const Viewer = struct {
     }
 
     pub fn deinit(self: *Viewer) void {
+        self.pane_outputs.deinit(self.alloc);
         {
             for (self.windows.items) |*window| window.deinit(self.alloc);
             self.windows.deinit(self.alloc);
@@ -482,7 +492,7 @@ pub const Viewer = struct {
     /// A line can be answered with any number of blocks: `a ; b` gets
     /// one per command (up to the first that fails), `if-shell` adds the
     /// blocks of what it runs, a comment gets none. So the line is
-    /// followed by an end marker of our own (see `Command.User`) and
+    /// followed by an end marker of our own (see `Command.Batch`) and
     /// everything up to the marker's block belongs to this command.
     ///
     /// The returned actions must be processed the same way as those from
@@ -498,13 +508,9 @@ pub const Viewer = struct {
             return &.{};
         }
 
-        const id = self.user_command_id;
-        self.user_command_id +%= 1;
-        const owned = std.fmt.allocPrint(
-            self.alloc,
-            "{s}" ++ Command.User.marker_command,
-            .{ command, id },
-        ) catch {
+        const id = self.next_command_id;
+        self.next_command_id +%= 1;
+        const batch = Command.Batch.init(self.alloc, command, id) catch {
             log.warn("failed to allocate command, dropping", .{});
             return &.{};
         };
@@ -512,15 +518,15 @@ pub const Viewer = struct {
         // If nothing is in flight we have to send this ourselves,
         // otherwise the queue will send it when its turn comes.
         const send = self.command_queue.empty();
-        self.queueCommands(&.{.{ .user = .{ .line = owned, .id = id } }}) catch {
+        self.queueCommands(&.{.{ .user = batch }}) catch {
             log.warn("failed to queue command, dropping", .{});
-            self.alloc.free(owned);
+            batch.deinit(self.alloc);
             return &.{};
         };
 
-        // The queue owns `owned` until the matching block arrives, so
+        // The queue owns the batch until the matching block arrives, so
         // this stays valid for as long as the action is.
-        return if (send) self.singleAction(.{ .command = owned }) else &.{};
+        return if (send) self.singleAction(.{ .command = batch.line }) else &.{};
     }
 
     /// The name of the subscription that `windows_subscription_command`
@@ -584,34 +590,23 @@ pub const Viewer = struct {
             return &.{};
         }
 
-        // Three commands rather than a `;` sequence because tmux wraps
-        // every command of a sequence in its own begin/end block, which
-        // our queue matches one-to-one. They are queued together, so
-        // their replies arrive one right after another.
-        const command: Command = .{ .follower_capture = .{
-            .id = pane_id,
-            .screen_key = .primary,
-        } };
+        const capture = Command.Capture.init(self.alloc, pane_id, self.next_command_id) catch {
+            log.warn("failed to prepare pane snapshot", .{});
+            return &.{};
+        };
+        self.next_command_id +%= 1;
         const send = self.command_queue.empty();
-        self.queueCommands(&.{
-            command,
-            .{ .follower_capture = .{ .id = pane_id, .screen_key = .alternate } },
-            .{ .follower_state = pane_id },
-        }) catch {
-            log.warn("failed to queue capture-pane, dropping", .{});
+        self.queueCommands(&.{.{ .capture = capture }}) catch {
+            capture.batch.deinit(self.alloc);
+            log.warn("failed to queue pane snapshot", .{});
             return &.{};
         };
-        if (!send) return &.{};
+        if (self.pane_outputs.getPtr(pane_id)) |output_state| output_state.ready = false;
+        return if (send) self.singleAction(.{ .command = capture.batch.line }) else &.{};
+    }
 
-        var arena = self.action_arena.promote(self.alloc);
-        defer self.action_arena = arena.state;
-        var builder: std.Io.Writer.Allocating = .init(arena.allocator());
-        command.formatCommand(&builder.writer) catch {
-            log.warn("failed to format capture-pane, dropping", .{});
-            return &.{};
-        };
-
-        return self.singleAction(.{ .command = builder.writer.buffered() });
+    pub fn canForwardOutput(self: *const Viewer, pane_id: usize) bool {
+        return if (self.pane_outputs.get(pane_id)) |state| state.ready else false;
     }
 
     fn nextTmux(
@@ -1067,10 +1062,33 @@ pub const Viewer = struct {
         try self.queueListWindows();
     }
 
+    fn copyOutputStates(
+        self: *const Viewer,
+        result: *PaneOutputs,
+        window: usize,
+        layout: Layout,
+    ) Allocator.Error!void {
+        switch (layout.content) {
+            .pane => |id| {
+                const previous = self.pane_outputs.get(id);
+                try result.put(self.alloc, id, .{
+                    .window = window,
+                    .ready = if (previous) |v| v.window == window and v.ready else false,
+                });
+            },
+            .horizontal, .vertical => |children| for (children) |child| {
+                try self.copyOutputStates(result, window, child);
+            },
+        }
+    }
+
     fn syncLayouts(
         self: *Viewer,
         windows: []const Window,
     ) !void {
+        var pane_outputs: PaneOutputs = .empty;
+        errdefer pane_outputs.deinit(self.alloc);
+        for (windows) |window| try self.copyOutputStates(&pane_outputs, window.id, window.layout);
         // Go through the window layout and setup all our panes. We move
         // this into a new panes map so that we can easily prune our old
         // list.
@@ -1138,6 +1156,9 @@ pub const Viewer = struct {
         // above will double-free if there is an error.
         errdefer comptime unreachable;
 
+        self.pane_outputs.deinit(self.alloc);
+        self.pane_outputs = pane_outputs;
+
         // Replace our window list if it changed. We assume it didn't
         // change if our pointer is pointing to the same data.
         if (windows.ptr != self.windows.items.ptr) {
@@ -1176,6 +1197,7 @@ pub const Viewer = struct {
         // Build up a new viewer. Its the easiest way to reset ourselves.
         var replacement: Viewer = try .init(self.io, self.alloc);
         errdefer replacement.deinit();
+        replacement.mirror_panes = self.mirror_panes;
 
         // Our actions must start out empty so we don't mix arenas
         assert(actions.items.len == 0);
@@ -1215,6 +1237,13 @@ pub const Viewer = struct {
                         command.* = .stale;
                     },
 
+                    .capture => |capture| if (head) {
+                        var discarded = capture;
+                        discarded.phase = .discarded;
+                        replacement.command_queue.appendAssumeCapacity(.{ .capture = discarded });
+                        command.* = .stale;
+                    },
+
                     else => if (head) {
                         replacement.command_queue.appendAssumeCapacity(.stale);
                     },
@@ -1228,7 +1257,7 @@ pub const Viewer = struct {
 
         // Transfer preserved state to replacement
         replacement.tmux_version = try replacement.alloc.dupe(u8, self.tmux_version);
-        replacement.user_command_id = self.user_command_id;
+        replacement.next_command_id = self.next_command_id;
 
         // Save arena state back before swap
         replacement.action_arena = arena.state;
@@ -1247,7 +1276,7 @@ pub const Viewer = struct {
 
     /// Handle a block that answers the command at the head of the queue.
     /// Returns true if that command is done and was removed from the
-    /// queue; a user command stays until its end marker arrives.
+    /// queue; a batch keeps its slot until its end marker arrives.
     fn receivedCommandOutput(
         self: *Viewer,
         actions: *std.ArrayList(Action),
@@ -1264,6 +1293,7 @@ pub const Viewer = struct {
         // We don't use their output; failures were already logged.
         switch (head.*) {
             .user => |user| if (!user.isEnd(block.data)) return false,
+            .capture => |*capture| if (!try self.receivedCapture(capture, actions, block, is_err)) return false,
             else => {},
         }
 
@@ -1307,16 +1337,7 @@ pub const Viewer = struct {
 
         // Process our command
         switch (command) {
-            .user, .stale => {},
-
-            .follower_capture => |cap| try self.receivedFollowerCapture(cap, content),
-
-            .follower_state => |id| try self.receivedFollowerState(
-                arena_alloc,
-                actions,
-                id,
-                content,
-            ),
+            .user, .capture, .stale => {},
 
             .pane_state => try self.receivedPaneState(content),
 
@@ -1753,11 +1774,11 @@ pub const Viewer = struct {
         stream.nextSlice(content);
     }
 
-    /// One screen of a view's capture (see `capturePane`). The primary
-    /// screen comes first and starts the pending restore.
-    fn receivedFollowerCapture(
+    /// A raw current or saved grid from the atomic capture batch.
+    fn receivedCaptureGrid(
         self: *Viewer,
-        cap: Command.CapturePane,
+        pane_id: usize,
+        grid: enum { current, saved },
         content: []const u8,
     ) Allocator.Error!void {
         // Decoded in place, then shrunk so that it frees at its length.
@@ -1765,51 +1786,42 @@ pub const Viewer = struct {
         errdefer self.alloc.free(copy);
         const decoded = try self.alloc.realloc(copy, control.unescape(copy).len);
 
-        switch (cap.screen_key) {
-            .primary => {
-                if (self.restore) |*v| v.deinit(self.alloc);
-                self.restore = .{ .pane_id = cap.id, .current = decoded };
+        switch (grid) {
+            .current => {
+                assert(self.restore == null);
+                self.restore = .{ .pane_id = pane_id, .current = decoded };
             },
-            .alternate => {
-                const restore = if (self.restore) |*v| v else null;
-                if (restore == null or restore.?.pane_id != cap.id) {
-                    self.alloc.free(decoded);
-                    return;
-                }
-                self.alloc.free(restore.?.saved);
-                restore.?.saved = decoded;
+            .saved => {
+                const restore = &self.restore.?;
+                assert(restore.pane_id == pane_id);
+                self.alloc.free(restore.saved);
+                restore.saved = decoded;
             },
         }
     }
 
-    /// The last reply of a view's capture: the pane's state. Sends the
-    /// `pane_restore` action with whatever screens were captured.
-    fn receivedFollowerState(
+    fn completeCapture(
         self: *Viewer,
         arena_alloc: Allocator,
         actions: *std.ArrayList(Action),
         id: usize,
-        content: []const u8,
-    ) Allocator.Error!void {
-        var restore: PendingRestore = if (self.restore) |v| restore: {
-            self.restore = null;
-            if (v.pane_id == id) break :restore v;
-            var stale = v;
-            stale.deinit(self.alloc);
-            break :restore .{ .pane_id = id };
-        } else .{ .pane_id = id };
+        pending: []const u8,
+    ) Allocator.Error!bool {
+        var restore = self.restore.?;
+        self.restore = null;
         defer restore.deinit(self.alloc);
+        assert(restore.pane_id == id);
 
-        const line = std.mem.trim(u8, content, " \r\n");
+        const line = std.mem.trim(u8, restore.state, " \r\n");
         var state = output.parseFormatStruct(
             Format.list_panes.Struct(),
             line,
             Format.list_panes.delim,
         ) catch {
             log.info("failed to parse pane state line: {s}", .{line});
-            return;
+            return false;
         };
-        if (state.pane_id != id) return;
+        if (state.pane_id != id) return false;
         state.cursor_shape = try arena_alloc.dupe(u8, state.cursor_shape);
         state.cursor_colour = try arena_alloc.dupe(u8, state.cursor_colour);
         state.pane_tabs = try arena_alloc.dupe(u8, state.pane_tabs);
@@ -1822,8 +1834,56 @@ pub const Viewer = struct {
                 .primary = try arena_alloc.dupe(u8, if (state.alternate_on) restore.saved else restore.current),
                 .alternate = try arena_alloc.dupe(u8, if (state.alternate_on) restore.current else restore.saved),
                 .state = state,
+                .pending = try control.unescapeAlloc(arena_alloc, pending),
             },
         });
+        return true;
+    }
+
+    fn receivedCapture(
+        self: *Viewer,
+        capture: *Command.Capture,
+        actions: *std.ArrayList(Action),
+        block: control.Block,
+        is_err: bool,
+    ) Allocator.Error!bool {
+        switch (capture.phase) {
+            .complete, .failed, .discarded => return capture.batch.isEnd(block.data),
+            else => {},
+        }
+        if (is_err or block.truncated) {
+            if (self.restore) |*restore| restore.deinit(self.alloc);
+            self.restore = null;
+            capture.phase = .failed;
+            log.warn("pane snapshot failed pane=%{d} err={} truncated={}", .{ capture.pane_id, is_err, block.truncated });
+            return false;
+        }
+
+        switch (capture.phase) {
+            .current => {
+                try self.receivedCaptureGrid(capture.pane_id, .current, block.data);
+                capture.phase = .saved;
+            },
+            .saved => {
+                try self.receivedCaptureGrid(capture.pane_id, .saved, block.data);
+                capture.phase = .state;
+            },
+            .state => {
+                self.restore.?.state = try self.alloc.dupe(u8, block.data);
+                capture.phase = .pending;
+            },
+            .pending => {
+                var arena = self.action_arena.promote(self.alloc);
+                defer self.action_arena = arena.state;
+                const restored = try self.completeCapture(arena.allocator(), actions, capture.pane_id, block.data);
+                capture.phase = if (restored) .complete else .failed;
+                if (restored) {
+                    if (self.pane_outputs.getPtr(capture.pane_id)) |state| state.ready = true;
+                }
+            },
+            .complete, .failed, .discarded => unreachable,
+        }
+        return false;
     }
 
     /// Write the bytes that make a fresh view of a pane look the way
@@ -1878,6 +1938,7 @@ pub const Viewer = struct {
         try writeMode(writer, "?6", state.origin_flag);
         const top = if (region and state.origin_flag) state.scroll_region_upper else 0;
         try writeCursor(writer, state.cursor_x, state.cursor_y -| top);
+        try writer.writeAll(restore.pending);
     }
 
     /// tmux reports a position it doesn't have as UINT_MAX. Anything past
@@ -2144,33 +2205,26 @@ const Command = union(enum) {
 
     /// User command. This is a command provided by the user. Since
     /// this is user provided, we can't be sure what it is.
-    user: User,
+    user: Batch,
 
     /// A command that was already in flight when the session changed.
     /// Its reply is about the old session and is dropped. This is never
     /// sent: it only ever takes the place of a command that was.
     stale,
 
-    /// Capture one grid and its history so a newly created view retains
-    /// the pane's contents. The pane ID is carried here
-    /// because the output doesn't identify itself.
-    follower_capture: CapturePane,
-
-    /// The modes, cursor and scroll region of the pane whose screens were
-    /// just captured, so the view resumes where tmux left off.
-    follower_state: usize,
+    /// One server command list captures a coherent pane snapshot.
+    capture: Capture,
 
     const CapturePane = struct {
         id: usize,
         screen_key: ScreenSet.Key,
     };
 
-    /// A command line from outside the viewer, followed by a command of
-    /// our own that marks the end of its output. tmux runs each line on
+    /// A command list followed by a marker on its own line. tmux runs each line on
     /// its own and in order, so the marker's block always comes after
     /// every block of the user's line, even if that line failed.
-    const User = struct {
-        /// The user's line and the marker line, ready to send. Owned by
+    const Batch = struct {
+        /// The commands and the marker line, ready to send. Owned by
         /// the viewer allocator.
         line: []const u8,
 
@@ -2183,8 +2237,19 @@ const Command = union(enum) {
         const marker_command = "display-message -p '" ++ marker_text ++ "'\n";
         const marker_text = "ghostty-command-end {d}";
 
+        fn init(alloc: Allocator, line: []const u8, id: u32) Allocator.Error!Batch {
+            return .{
+                .line = try std.fmt.allocPrint(alloc, "{s}" ++ marker_command, .{ line, id }),
+                .id = id,
+            };
+        }
+
+        fn deinit(self: Batch, alloc: Allocator) void {
+            alloc.free(self.line);
+        }
+
         /// True if `data` is the output of this command's end marker.
-        fn isEnd(self: User, data: []const u8) bool {
+        fn isEnd(self: Batch, data: []const u8) bool {
             var buf: [64]u8 = undefined;
             const marker = std.fmt.bufPrint(
                 &buf,
@@ -2195,6 +2260,28 @@ const Command = union(enum) {
         }
     };
 
+    const Capture = struct {
+        batch: Batch,
+        pane_id: usize,
+        phase: enum { current, saved, state, pending, complete, failed, discarded } = .current,
+
+        fn init(alloc: Allocator, pane_id: usize, marker: u32) !Capture {
+            var command: std.Io.Writer.Allocating = .init(alloc);
+            defer command.deinit();
+            try command.writer.print(
+                "capture-pane -p -e -C -J -q -t %{d} -S -; " ++
+                    "capture-pane -p -e -C -J -q -a -t %{d} -S -; " ++
+                    "display-message -p -t %{d} -F '{s}'; " ++
+                    "capture-pane -p -P -C -t %{d}\n",
+                .{ pane_id, pane_id, pane_id, comptime Format.list_panes.comptimeFormat(), pane_id },
+            );
+            return .{
+                .batch = try .init(alloc, command.writer.buffered(), marker),
+                .pane_id = pane_id,
+            };
+        }
+    };
+
     pub fn deinit(self: Command, alloc: Allocator) void {
         return switch (self) {
             .list_windows,
@@ -2202,11 +2289,10 @@ const Command = union(enum) {
             .pane_visible,
             .pane_state,
             .tmux_version,
-            .follower_capture,
-            .follower_state,
             .stale,
             => {},
-            .user => |v| alloc.free(v.line),
+            .user => |v| v.deinit(alloc),
+            .capture => |v| v.batch.deinit(alloc),
         };
     }
 
@@ -2273,23 +2359,7 @@ const Command = union(enum) {
 
             .stale => unreachable,
 
-            .follower_capture => |cap| try writer.print(
-                // -C so that the escape sequences -e emits can't
-                // terminate the DCS; see pane_history. -J so that lines
-                // tmux wrapped come back whole: the view wraps them again
-                // and, like tmux, reflows them when the pane is resized
-                // later, which rows broken at the width of the capture
-                // can't do. -q so that a pane without an alternate screen
-                // answers with nothing.
-                "capture-pane -p -e -C -J -q{s} -t %{d} -S -\n",
-                .{ if (cap.screen_key == .alternate) " -a" else "", cap.id },
-            ),
-
-            .follower_state => |id| {
-                try writer.print("display-message -p -t %{d} -F '", .{id});
-                try writer.writeAll(comptime Format.list_panes.comptimeFormat());
-                try writer.writeAll("'\n");
-            },
+            .capture => |capture| try writer.writeAll(capture.batch.line),
         }
     }
 };
@@ -3775,9 +3845,9 @@ fn testAttach(viewer: *Viewer, list_windows: []const u8) !void {
     try testing.expect(viewer.state == .command_queue);
 }
 
-/// The output of the end marker that follows the `id`th user command.
+/// The output of the end marker that follows the `id`th command batch.
 fn testMarker(buf: []u8, id: u32) []const u8 {
-    return std.fmt.bufPrint(buf, Command.User.marker_text, .{id}) catch unreachable;
+    return std.fmt.bufPrint(buf, Command.Batch.marker_text, .{id}) catch unreachable;
 }
 
 fn testHasAction(actions: []const Viewer.Action, tag: std.meta.Tag(Viewer.Action)) bool {
@@ -3930,6 +4000,51 @@ test "pane restore with origin mode places the cursor in the region" {
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "ignored") == null);
 }
 
+test "pane restore preserves an unfinished escape sequence" {
+    const state = try output.parseFormatStruct(
+        Viewer.PaneState,
+        "%1;0;0;1;default;none;0;0;4294967295;4294967295;0;1;0;0;0;0;0;0;0;0;0;0;0;23;",
+        ';',
+    );
+    var bytes: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&bytes);
+    try Viewer.writePaneRestore(&writer, .{
+        .pane_id = 1,
+        .primary = "",
+        .alternate = "",
+        .state = state,
+        .pending = "\x1b[",
+    });
+    var term: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 20, .rows = 24 });
+    defer term.deinit(testing.allocator);
+    var stream = term.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(writer.buffered());
+    stream.nextSlice("31mZ");
+    const text = try term.screens.active.dumpStringAlloc(testing.allocator, .{ .active = .{} });
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("Z", std.mem.trim(u8, text, " \r\n"));
+}
+
+test "pane snapshot drains across a session change" {
+    var viewer = try Viewer.init(testing.io, testing.allocator);
+    defer viewer.deinit();
+    viewer.mirror_panes = false;
+    try testAttach(&viewer, "$0\t@0\t0\t1\t0\t%0\t80\t24\tb25d,80x24,0,0,0\tb25d,80x24,0,0,0\tA\tshell");
+    _ = viewer.capturePane(0);
+    _ = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "old contents" } } });
+    _ = viewer.next(.{ .tmux = .{ .session_changed = .{ .id = 2, .name = "other" } } });
+    try testing.expect(!viewer.mirror_panes);
+    try testing.expect(!viewer.canForwardOutput(0));
+    for (0..3) |_| {
+        const actions = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "stale reply" } } });
+        try testing.expect(!testHasAction(actions, .pane_restore));
+        try testing.expect(testCommand(actions) == null);
+    }
+    const next = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "ghostty-command-end 0" } } });
+    try testing.expect(std.mem.startsWith(u8, testCommand(next).?, "list-windows"));
+}
+
 test "pane restore gathers both screens and the state" {
     var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
@@ -3937,17 +4052,21 @@ test "pane restore gathers both screens and the state" {
 
     const first = viewer.capturePane(0);
     try testing.expect(std.mem.startsWith(u8, testCommand(first).?, "capture-pane -p -e -C -J -q -t %0"));
+    try testing.expect(std.mem.find(u8, testCommand(first).?, "; capture-pane -p -e -C -J -q -a -t %0") != null);
+    try testing.expect(!viewer.canForwardOutput(0));
     {
         const actions = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "vim\n" } } });
-        try testing.expect(std.mem.startsWith(u8, testCommand(actions).?, "capture-pane -p -e -C -J -q -a -t %0"));
+        try testing.expect(testCommand(actions) == null);
     }
     {
         const actions = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "one\\134two\ntwo\n" } } });
-        try testing.expect(std.mem.startsWith(u8, testCommand(actions).?, "display-message -p -t %0 -F '"));
+        try testing.expect(testCommand(actions) == null);
     }
-    const actions = viewer.next(.{ .tmux = .{ .block_end = .{
+    _ = viewer.next(.{ .tmux = .{ .block_end = .{
         .data = "%0;1;2;1;default;none;0;1;0;0;0;1;0;0;0;0;0;0;0;0;0;0;0;23;",
     } } });
+    try testing.expect(!viewer.canForwardOutput(0));
+    const actions = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "\\033[" } } });
     var found = false;
     for (actions) |action| switch (action) {
         .pane_restore => |v| {
@@ -3958,10 +4077,13 @@ test "pane restore gathers both screens and the state" {
             try testing.expect(v.state.alternate_on);
             try testing.expectEqual(1, v.state.cursor_x);
             try testing.expectEqual(2, v.state.cursor_y);
+            try testing.expectEqualStrings("\x1b[", v.pending);
         },
         else => {},
     };
     try testing.expect(found);
+    try testing.expect(viewer.canForwardOutput(0));
+    _ = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "ghostty-command-end 0" } } });
     try testing.expect(viewer.command_queue.empty());
 }
 
@@ -3970,14 +4092,14 @@ test "error replies to captures and pane state are not content" {
     defer viewer.deinit();
     try testAttach(&viewer, "$0\t@0\t0\t1\t0\t%0\t80\t24\tb25d,80x24,0,0,0\tb25d,80x24,0,0,0\tA\tshell");
 
-    // The pane closed before the follower's capture ran: every reply is
-    // an error and no restore goes out.
+    // An error aborts the command list; its separate marker still arrives.
     const first = viewer.capturePane(7);
     try testing.expect(std.mem.startsWith(u8, testCommand(first).?, "capture-pane"));
-    for (0..3) |_| {
+    {
         const actions = viewer.next(.{ .tmux = .{ .block_err = .{ .data = "can't find pane: %7" } } });
         try testing.expect(!testHasAction(actions, .pane_restore));
     }
+    _ = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "ghostty-command-end 0" } } });
     try testing.expect(viewer.command_queue.empty());
 
     // A capture too large to receive is dropped the same way, and a state
@@ -3989,6 +4111,8 @@ test "error replies to captures and pane state are not content" {
         const actions = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "3,4" } } });
         try testing.expect(!testHasAction(actions, .pane_restore));
     }
+    _ = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "" } } });
+    _ = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "ghostty-command-end 1" } } });
     try testing.expect(viewer.command_queue.empty());
 
     // A pane state reply with a line we can't read skips that line.
