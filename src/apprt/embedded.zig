@@ -1155,6 +1155,10 @@ pub const Surface = struct {
         return self.tmux_pane;
     }
 
+    pub fn tmuxReparent(self: *Surface, window: usize) void {
+        if (self.tmux_pane) |*pane| pane.window = window;
+    }
+
     /// Paste explicit text into the surface as if it came from the
     /// clipboard, regardless of the actual clipboard contents. Unlike
     /// textCallback, this honors paste protection: unsafe text routes
@@ -2377,6 +2381,12 @@ pub const CAPI = struct {
         left: u16 = 0,
         right: u16 = 0,
     };
+
+    export fn ghostty_tmux_window_at(batch: apprt.action.TmuxWindow.C, index: usize) ?*const apprt.action.TmuxWindow.Spec {
+        if (index >= batch.count) return null;
+        const specs: [*]const apprt.action.TmuxWindow.Spec = @ptrCast(@alignCast(batch.specs));
+        return &specs[index];
+    }
 
     export fn ghostty_tmux_window_info(spec: *const apprt.action.TmuxWindow.Spec) TmuxWindowInfo {
         return .{

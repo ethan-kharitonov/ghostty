@@ -220,8 +220,7 @@ pub const Viewer = struct {
     /// Numbers the end markers of command batches.
     next_command_id: u32 = 0,
 
-    const PaneOutput = struct { window: usize, ready: bool };
-    const PaneOutputs = std.AutoHashMapUnmanaged(usize, PaneOutput);
+    const PaneOutputs = std.AutoHashMapUnmanaged(usize, bool);
 
     pub const CommandQueue = CircBuf(Command, undefined);
     pub const PanesMap = std.AutoArrayHashMapUnmanaged(usize, Pane);
@@ -601,12 +600,12 @@ pub const Viewer = struct {
             log.warn("failed to queue pane snapshot", .{});
             return &.{};
         };
-        if (self.pane_outputs.getPtr(pane_id)) |output_state| output_state.ready = false;
+        if (self.pane_outputs.getPtr(pane_id)) |output_state| output_state.* = false;
         return if (send) self.singleAction(.{ .command = capture.batch.line }) else &.{};
     }
 
     pub fn canForwardOutput(self: *const Viewer, pane_id: usize) bool {
-        return if (self.pane_outputs.get(pane_id)) |state| state.ready else false;
+        return self.pane_outputs.get(pane_id) orelse false;
     }
 
     fn nextTmux(
@@ -1065,19 +1064,12 @@ pub const Viewer = struct {
     fn copyOutputStates(
         self: *const Viewer,
         result: *PaneOutputs,
-        window: usize,
         layout: Layout,
     ) Allocator.Error!void {
         switch (layout.content) {
-            .pane => |id| {
-                const previous = self.pane_outputs.get(id);
-                try result.put(self.alloc, id, .{
-                    .window = window,
-                    .ready = if (previous) |v| v.window == window and v.ready else false,
-                });
-            },
+            .pane => |id| try result.put(self.alloc, id, self.pane_outputs.get(id) orelse false),
             .horizontal, .vertical => |children| for (children) |child| {
-                try self.copyOutputStates(result, window, child);
+                try self.copyOutputStates(result, child);
             },
         }
     }
@@ -1088,7 +1080,7 @@ pub const Viewer = struct {
     ) !void {
         var pane_outputs: PaneOutputs = .empty;
         errdefer pane_outputs.deinit(self.alloc);
-        for (windows) |window| try self.copyOutputStates(&pane_outputs, window.id, window.layout);
+        for (windows) |window| try self.copyOutputStates(&pane_outputs, window.layout);
         // Go through the window layout and setup all our panes. We move
         // this into a new panes map so that we can easily prune our old
         // list.
@@ -1878,7 +1870,7 @@ pub const Viewer = struct {
                 const restored = try self.completeCapture(arena.allocator(), actions, capture.pane_id, block.data);
                 capture.phase = if (restored) .complete else .failed;
                 if (restored) {
-                    if (self.pane_outputs.getPtr(capture.pane_id)) |state| state.ready = true;
+                    if (self.pane_outputs.getPtr(capture.pane_id)) |state| state.* = true;
                 }
             },
             .complete, .failed, .discarded => unreachable,

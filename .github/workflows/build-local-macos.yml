@@ -7,16 +7,21 @@ on:
         description: Branch or full commit SHA to build
         required: true
         default: main
+      inspect_run:
+        description: Inspect an existing test run instead of building
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: local-macos-${{ inputs.source_ref }}
+  group: local-macos-${{ inputs.source_ref }}-${{ inputs.inspect_run }}
   cancel-in-progress: true
 
 jobs:
   build:
+    if: inputs.inspect_run == ''
     runs-on: xcode-27
     # Run 41156429914 took 694s to build, 212s for core tests, and 32s
     # to save caches. Include UI execution and a 25 percent margin.
@@ -82,11 +87,17 @@ jobs:
         id: native_checks
         run: xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal -arch arm64 -derivedDataPath "$RUNNER_TEMP/GhosttyDerived" -resultBundlePath "$RUNNER_TEMP/GhosttyUITests.xcresult" -parallel-testing-enabled NO -only-testing:GhosttyUITests/TmuxControlModeUITests -only-testing:GhosttyTests/TerminalCoprocessTests test-without-building
 
+      - name: Collect terminal diagnostics
+        if: always() && steps.build_app.outcome == 'success'
+        run: /usr/bin/log show --last 15m --style compact --info --debug --predicate 'process == "ghostty" AND (eventMessage CONTAINS "program status" OR eventMessage CONTAINS "tmux presentation" OR eventMessage CONTAINS "snapshot failed" OR eventMessage CONTAINS "pane state" OR eventMessage CONTAINS "backpressure")' > "$RUNNER_TEMP/ghostty-terminal.log"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: Ghostty-tmux-ui-results
-          path: ${{ runner.temp }}/GhosttyUITests.xcresult
+          path: |
+            ${{ runner.temp }}/GhosttyUITests.xcresult
+            ${{ runner.temp }}/ghostty-terminal.log
           if-no-files-found: ignore
 
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -114,4 +125,46 @@ jobs:
             Ghostty-macos-arm64.zip
             build-commit.txt
             validation-status.txt
+          if-no-files-found: error
+
+  inspect:
+    if: inputs.inspect_run != ''
+    runs-on: xcode-27
+    # The 29MB app artifact downloaded and extracted in 12 seconds.
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN: ${{ inputs.inspect_run }}
+    steps:
+      - name: Read native test diagnostics
+        run: |
+          gh run download "$SOURCE_RUN" -R "$GITHUB_REPOSITORY" -n Ghostty-tmux-ui-results -D "$RUNNER_TEMP/results"
+          if [ -f "$RUNNER_TEMP/results/Info.plist" ]; then
+            mv "$RUNNER_TEMP/results" "$RUNNER_TEMP/inspection.xcresult"
+          else
+            mv "$RUNNER_TEMP/results/GhosttyUITests.xcresult" "$RUNNER_TEMP/inspection.xcresult"
+          fi
+          xcrun xcresulttool get test-results tests --path "$RUNNER_TEMP/inspection.xcresult" > "$RUNNER_TEMP/summary.json"
+          xcrun xcresulttool export diagnostics --path "$RUNNER_TEMP/inspection.xcresult" --output-path "$RUNNER_TEMP/diagnostics"
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/inspection.xcresult" --output-path "$RUNNER_TEMP/attachments" --only-failures
+          python3 - "$RUNNER_TEMP" <<'PYTHON'
+          import pathlib, subprocess, sys
+          root = pathlib.Path(sys.argv[1])
+          predicate = 'process == "ghostty" AND (eventMessage CONTAINS "program status" OR eventMessage CONTAINS "tmux presentation" OR eventMessage CONTAINS "snapshot failed" OR eventMessage CONTAINS "pane state")'
+          for index, archive in enumerate((root / "diagnostics").rglob("*.logarchive")):
+              with (root / f"terminal-{index}.log").open("w") as output:
+                  subprocess.run(["/usr/bin/log", "show", "--archive", str(archive), "--style", "compact", "--info", "--debug", "--predicate", predicate], stdout=output, check=True)
+          PYTHON
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: Ghostty-inspected-results
+          path: |
+            ${{ runner.temp }}/summary.json
+            ${{ runner.temp }}/terminal-*.log
+            ${{ runner.temp }}/attachments
           if-no-files-found: error

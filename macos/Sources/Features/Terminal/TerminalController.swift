@@ -64,6 +64,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
+         withFocusedSurface focus: Ghostty.SurfaceView? = nil,
          parent: NSWindow? = nil
     ) {
         // The window we manage is not restorable if we've specified a command
@@ -76,7 +77,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)
 
-        super.init(ghostty, baseConfig: base, surfaceTree: tree)
+        super.init(ghostty, baseConfig: base, surfaceTree: tree, focusedSurface: focus)
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default

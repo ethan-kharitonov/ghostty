@@ -1025,9 +1025,10 @@ typedef enum {
   GHOSTTY_ACTION_SESSION_STATUS,
 } ghostty_action_tag_e;
 
-// The spec and all strings borrowed from it are valid during the action callback.
+// The batch and all borrowed fields are valid during the action callback.
 typedef struct {
-  const void* spec;
+  const void* specs;
+  uintptr_t count;
 } ghostty_action_tmux_window_s;
 
 typedef struct {
@@ -1284,6 +1285,7 @@ GHOSTTY_API void ghostty_surface_split_resize(ghostty_surface_t,
                                                  uint16_t);
 GHOSTTY_API void ghostty_surface_split_equalize(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_binding_action(ghostty_surface_t, const char*, uintptr_t);
+GHOSTTY_API const void* ghostty_tmux_window_at(ghostty_action_tmux_window_s, uintptr_t);
 GHOSTTY_API ghostty_tmux_window_info_s ghostty_tmux_window_info(const void*);
 GHOSTTY_API void ghostty_app_prepare_quit(ghostty_app_t);
 GHOSTTY_API bool ghostty_tmux_window_node(const void*, uintptr_t, ghostty_tmux_node_s*);

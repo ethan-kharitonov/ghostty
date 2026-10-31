@@ -147,7 +147,8 @@ class BaseTerminalController: NSWindowController,
 
     init(_ ghostty: Ghostty.App,
          baseConfig base: Ghostty.SurfaceConfiguration? = nil,
-         surfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil
+         surfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
+         focusedSurface initialFocus: Ghostty.SurfaceView? = nil
     ) {
         self.ghostty = ghostty
         self.derivedConfig = DerivedConfig(ghostty.config)
@@ -156,7 +157,9 @@ class BaseTerminalController: NSWindowController,
 
         // Initialize our initial surface.
         guard let ghostty_app = ghostty.app else { preconditionFailure("app must be loaded") }
-        self.surfaceTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: base))
+        let initialTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: base))
+        self.focusedSurface = initialFocus ?? initialTree.root?.leftmostLeaf()
+        self.surfaceTree = initialTree
         Self.updateSurfaceControllers(self, from: .init(), to: surfaceTree)
 
         // Setup our bell state for the window

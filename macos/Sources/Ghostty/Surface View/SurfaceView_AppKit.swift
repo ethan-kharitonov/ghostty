@@ -878,7 +878,7 @@ extension Ghostty {
 
         override func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()
-            if result { focusDidChange(true) }
+            if result { focusDidChange(window?.isKeyWindow ?? false) }
             return result
         }
 
@@ -2389,6 +2389,10 @@ extension Ghostty.SurfaceView {
         /// We use .textArea because the terminal surface is essentially an editable text area
         /// where users can input commands and view output.
         return .textArea
+    }
+
+    override func accessibilityIdentifier() -> String? {
+        "terminal-\(id.uuidString)"
     }
 
     override func accessibilityHelp() -> String? {

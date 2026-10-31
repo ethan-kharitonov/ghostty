@@ -2641,7 +2641,14 @@ const Action = struct {
     /// Show a tmux window as a tab: create, update or close it so that it
     /// shows the window's whole split tree. See `apprt.Action.tmux_window`.
     pub fn tmuxWindow(self: *Application, value: apprt.action.TmuxWindow) bool {
-        const spec = value.spec;
+        var handled = true;
+        for (value.specs) |*spec| {
+            if (!tmuxWindowSpec(self, spec)) handled = false;
+        }
+        return handled;
+    }
+
+    fn tmuxWindowSpec(self: *Application, spec: *const apprt.action.TmuxWindow.Spec) bool {
         const priv = self.private();
 
         // Selecting and closing tabs below must not be reported to tmux

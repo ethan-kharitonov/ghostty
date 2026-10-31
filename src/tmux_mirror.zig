@@ -360,16 +360,8 @@ pub const Placement = struct {
     after: ?usize,
 };
 
-/// Whether the follower of `pane` has to be released before a layout is
-/// mirrored, because its pane is gone or tmux moved it to another window
-/// than the one whose tab holds the follower. `pane_window` maps panes to
-/// their window in the new layout, `placed` to the window whose tab their
-/// follower was placed in.
-///
-/// Such a follower is released, which forgets its pane without telling
-/// tmux, before its tab drops it. Dropped while still registered, it would
-/// kill the pane as it closes, which for a moved pane is a pane tmux still
-/// shows somewhere else.
+/// Whether a pane is gone or moved from the window that last displayed it.
+/// The runtime may reparent a moved view or release it before replacing it.
 pub fn isMisplaced(pane_window: anytype, placed: anytype, pane: usize) bool {
     const window = pane_window.get(pane) orelse return true;
     return placed.get(pane) != window;

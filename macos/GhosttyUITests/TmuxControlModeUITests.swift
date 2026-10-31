@@ -33,6 +33,36 @@ final class TmuxControlModeUITests: XCTestCase {
     }
 
     @MainActor
+    func testMovingPanesKeepsTheirTerminalViewsAndLiveOutput() throws {
+        launchConnectedTerminal()
+        try tmux(["new-window", "-d", "-t", "native", "-n", "Second", "exec cat"])
+        try tmux(["new-window", "-d", "-t", "native", "-n", "Third", "exec cat"])
+        try tmux(["split-window", "-h", "-t", "native:2", "exec cat"])
+        for (name, target) in [("First", "native:0"), ("Third", "native:2")] {
+            try tmux(["select-window", "-t", target])
+            XCTAssertTrue(app.windows[name].waitForExistence(timeout: 5))
+            let identifiers = app.windows[name].textViews.allElementsBoundByIndex.map(\.identifier)
+            XCTAssertEqual(identifiers.count, 2)
+            XCTAssertTrue(identifiers.allSatisfy { !$0.isEmpty })
+            let panes = try tmux(["list-panes", "-t", target, "-F", "#{pane_id}"]).split(separator: "\n").map(String.init)
+            for (pane, identifier) in zip(panes, identifiers) {
+                try tmux(["join-pane", "-s", pane, "-t", "native:1", "-h"])
+                let view = app.windows["Second"].textViews[identifier]
+                XCTAssertTrue(view.waitForExistence(timeout: 5))
+                let tty = try tmux(["display-message", "-p", "-t", pane, "#{pane_tty}"])
+                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: tty))
+                try handle.write(contentsOf: Data("OK\r\n".utf8))
+                try handle.close()
+                let output = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    (view.value as? String)?.contains("OK") == true
+                }, object: nil)
+                XCTAssertEqual(XCTWaiter.wait(for: [output], timeout: 5), .completed)
+            }
+            XCTAssertTrue(app.windows[name].waitForNonExistence(timeout: 5))
+        }
+    }
+
+    @MainActor
     func testImportingWindowGroupsPreservesITermMetadata() throws {
         let metadata = "a_302c7074792d6162633b57696e646f775374796c653d46756c6c53637265656e"
         try tmux(["set-option", "-t", "native", "@affinities", metadata])

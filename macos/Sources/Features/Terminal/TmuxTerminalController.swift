@@ -22,9 +22,10 @@ final class TmuxTerminalController: TerminalController {
     private var closingFromServer = false
 
     init(_ app: Ghostty.App, id: ID, config: Ghostty.SurfaceConfiguration,
-         tree: SplitTree<Ghostty.SurfaceView>) {
+         layout: Layout) {
         self.id = id
-        super.init(app, withBaseConfig: config, withSurfaceTree: tree)
+        self.splitHandles = layout.splitHandles
+        super.init(app, withBaseConfig: config, withSurfaceTree: layout.tree, withFocusedSurface: layout.focused)
     }
 
     required init?(coder: NSCoder) {
@@ -37,21 +38,19 @@ final class TmuxTerminalController: TerminalController {
 
     func apply(_ info: ghostty_tmux_window_info_s,
                layout: Layout,
-               sibling: NSWindow?, after: NSWindow?, created: Bool, gateway: BaseTerminalController?) {
+               sibling: NSWindow?, after: NSWindow?, created: Bool, frame: NSRect?) {
         applying = true
         defer {
             applying = false
             reportSize()
         }
-        let gatewayFrame = gateway?.window?.frame
-        let transferFocus = gateway?.suspendPresentation() ?? false
         serial = info.serial
         self.splitHandles = layout.splitHandles
         surfaceTree = layout.tree
         titleOverride = String(cString: info.title)
         focusedSurface = layout.focused
         guard let window else { return }
-        if let gatewayFrame { window.setFrame(gatewayFrame, display: false) }
+        if let frame { window.setFrame(frame, display: false) }
         if created {
             if let sibling {
                 _ = sibling.addTabbedWindowSafely(window, ordered: .above)
@@ -68,9 +67,6 @@ final class TmuxTerminalController: TerminalController {
             if info.select { group.selectedWindow = window }
         }
         syncAppearance()
-        if info.present || transferFocus { window.makeKeyAndOrderFront(nil) }
-        if window.isKeyWindow, let focused = layout.focused { Ghostty.moveFocus(to: focused) }
-        Ghostty.logger.debug("tmux presentation window=\(info.window) select=\(info.select) transferFocus=\(transferFocus) key=\(window.isKeyWindow)")
     }
 
     func closeFromServer() {

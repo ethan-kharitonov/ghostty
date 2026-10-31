@@ -32,6 +32,8 @@ protocol TerminalViewModel: ObservableObject {
     /// The tree of terminal surfaces (splits) within the view. This is mutated by TerminalView
     /// and children. This should be @Published.
     var surfaceTree: SplitTree<Ghostty.SurfaceView> { get set }
+    /// The pane selected by the controller, including before the window appears.
+    var focusedSurface: Ghostty.SurfaceView? { get }
 
     /// The command palette state.
     var commandPaletteIsShowing: Bool { get set }
@@ -53,7 +55,6 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
     /// The most recently focused surface, equal to `focusedSurface` when it is non-nil.
     @State private var lastFocusedSurface: Weak<Ghostty.SurfaceView>?
 
-    // This seems like a crutch after switching from SwiftUI to AppKit lifecycle.
     @FocusState private var focused: Bool
 
     // Various state values sent back up from the currently focused terminals.
@@ -91,7 +92,9 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         }
                         .ghosttyLastFocusedSurface(lastFocusedSurface)
                         .focused($focused)
-                        .onAppear { self.focused = true }
+                        .onAppear {
+                            if let initial = viewModel.focusedSurface { Ghostty.moveFocus(to: initial) }
+                        }
                         .onChange(of: focusedSurface) { newValue in
                             // We want to keep track of our last focused surface so even if
                             // we lose focus we keep this set to the last non-nil value.

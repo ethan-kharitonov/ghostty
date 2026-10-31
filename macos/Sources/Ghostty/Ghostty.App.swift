@@ -621,10 +621,9 @@ extension Ghostty {
                 return true
 
             case GHOSTTY_ACTION_TMUX_WINDOW:
-                guard let userdata = ghostty_app_userdata(app),
-                      let spec = action.action.tmux_window.spec else { return false }
+                guard let userdata = ghostty_app_userdata(app) else { return false }
                 let state = Unmanaged<App>.fromOpaque(userdata).takeUnretainedValue()
-                return state.tmuxWindows.apply(spec, app: state)
+                return state.tmuxWindows.apply(action.action.tmux_window, app: state)
 
             case GHOSTTY_ACTION_QUIT:
                 quit(app)

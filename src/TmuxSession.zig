@@ -1048,9 +1048,8 @@ pub const Session = struct {
             window.active_pane = pane;
         }
 
-        // Surfaces whose pane is gone or now in another window can't stay
-        // where they are. The tab that held them drops them; a moved pane
-        // gets a new surface in its new tab.
+        // Release deleted panes. Runtimes that can reparent keep live panes,
+        // including their terminal state, when the containing window changes.
         self.releaseMisplaced();
         self.pushGrids();
 
@@ -1108,7 +1107,7 @@ pub const Session = struct {
             }
         }
 
-        for (specs.items) |*spec| self.perform(spec);
+        self.perform(specs.items);
     }
 
     /// Give tmux window `window_id` the size of its native tab, unless it
@@ -1180,11 +1179,11 @@ pub const Session = struct {
             return;
         };
         defer placements.deinit(arena.allocator());
-        var spec = self.buildSpec(arena.allocator(), window, placements.get(window_id).?, select) catch |err| {
+        const spec = self.buildSpec(arena.allocator(), window, placements.get(window_id).?, select) catch |err| {
             log.warn("failed to build tmux tab err={}", .{err});
             return;
         };
-        self.perform(&spec);
+        self.perform(&.{spec});
     }
 
     fn tabPlacements(self: *Session, alloc: Allocator) !std.AutoHashMapUnmanaged(usize, tmux_mirror.Placement) {
@@ -1270,24 +1269,22 @@ pub const Session = struct {
         };
     }
 
-    fn perform(self: *Session, spec: *const TmuxWindow.Spec) void {
-        log.debug(
-            "tab window=@{d} serial={d} nodes={d} select={} zoomed={?d} title={s}",
-            .{ spec.window, spec.serial, spec.nodes.len, spec.select, spec.zoomed, spec.title },
-        );
+    fn perform(self: *Session, specs: []const TmuxWindow.Spec) void {
+        if (specs.len == 0) return;
+        log.debug("updating {d} tmux tabs", .{specs.len});
         const handled = self.leader.rt_app.performAction(
             .{ .surface = self.leader },
             .tmux_window,
-            .{ .spec = spec },
+            .{ .specs = specs },
         ) catch |err| {
-            log.warn("failed to mirror tmux window err={}", .{err});
+            log.warn("failed to mirror tmux layout err={}", .{err});
             return;
         };
-        if (!handled) log.warn("apprt did not mirror tmux window @{d}", .{spec.window});
+        if (!handled) log.warn("apprt did not mirror tmux layout", .{});
     }
 
-    /// Release the followers whose pane is gone, or is in another window
-    /// than the tab that holds the follower.
+    /// Retain moved followers when the runtime can reparent them, and release
+    /// the others before their old tabs drop them.
     fn releaseMisplaced(self: *Session) void {
         var misplaced: std.ArrayList(*Surface) = .empty;
         defer misplaced.deinit(self.alloc);
@@ -1296,6 +1293,12 @@ pub const Session = struct {
         while (it.next()) |entry| {
             const pane = entry.key_ptr.*;
             if (!tmux_mirror.isMisplaced(self.pane_window, self.placed, pane)) continue;
+            if (comptime @hasDecl(apprt.Surface, "tmuxReparent")) {
+                if (self.pane_window.get(pane)) |window| {
+                    entry.value_ptr.*.rt_surface.tmuxReparent(window);
+                    continue;
+                }
+            }
             misplaced.append(self.alloc, entry.value_ptr.*) catch |err| {
                 log.warn("failed to collect moved tmux pane err={}", .{err});
             };
@@ -1629,18 +1632,9 @@ pub const Session = struct {
         self.pane_to_surface.clearRetainingCapacity();
         self.surface_to_pane.clearRetainingCapacity();
 
-        var windows: std.ArrayList(usize) = .empty;
-        defer windows.deinit(self.alloc);
         var it = self.mirrored.keyIterator();
-        while (it.next()) |id| windows.append(self.alloc, id.*) catch |err| {
-            log.warn("failed to collect tmux tab err={}", .{err});
-        };
+        while (it.next()) |id| self.perform(&.{self.closedSpec(id.*)});
         self.mirrored.clearRetainingCapacity();
-
-        for (windows.items) |id| {
-            const spec = self.closedSpec(id);
-            self.perform(&spec);
-        }
     }
 
     /// Close the followers whose pane no longer exists in tmux. We

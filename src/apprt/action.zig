@@ -364,11 +364,10 @@ pub const Action = union(Key) {
     /// split or the window is fullscreen.
     resize_window: ResizeWindow,
 
-    /// Mirror one tmux control mode window as one native tab: create,
-    /// update or close the tab so that its whole split tree matches the
-    /// window. The payload is Zig-only. It is only sent to apprts whose
-    /// surfaces have `tmuxPane` (`TmuxSession.native_layout`); on the
-    /// others, each new surface adopts the next tmux pane instead.
+    /// Apply a complete native tmux layout update. A runtime can retain
+    /// moved pane views until every affected tab has adopted its new tree.
+    /// Sent to runtimes with explicit `tmuxPane` identity; other runtimes
+    /// create followers sequentially.
     tmux_window: TmuxWindow,
 
     /// Run a local coprocess for a surface. The callback borrows the command.
@@ -759,10 +758,10 @@ pub const ResizeWindow = extern struct {
     height: u32,
 };
 
-/// One tmux window to show as one native tab. See `Action.tmux_window`.
+/// A complete native tmux layout update. Borrowed for the action callback.
 pub const TmuxWindow = struct {
     /// Borrowed: only valid for the duration of the action call.
-    spec: *const Spec,
+    specs: []const Spec,
 
     pub const Spec = struct {
         /// Identifies one attach to a tmux session. It changes on every
@@ -854,11 +853,12 @@ pub const TmuxWindow = struct {
     };
 
     pub const C = extern struct {
-        spec: *const anyopaque,
+        specs: *const anyopaque,
+        count: usize,
     };
 
     pub fn cval(self: TmuxWindow) C {
-        return .{ .spec = self.spec };
+        return .{ .specs = @ptrCast(self.specs.ptr), .count = self.specs.len };
     }
 };
 
