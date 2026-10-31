@@ -13,10 +13,9 @@ final class TmuxWindows {
         var selected: UInt?
         var frame: NSRect?
         var requestFocus = false
-        let fullscreenMode: FullscreenMode?
         var pendingFullscreen: [UInt] = []
 
-        init(parent: ghostty_surface_t?, fullscreenMode: FullscreenMode?) {
+        init(parent: ghostty_surface_t?) {
             if let parent, let userdata = ghostty_surface_userdata(parent) {
                 let view = Unmanaged<Ghostty.SurfaceView>.fromOpaque(userdata).takeUnretainedValue()
                 gateway = BaseTerminalController.controller(owning: view)
@@ -24,11 +23,6 @@ final class TmuxWindows {
                 gateway = nil
             }
             frame = gateway?.window?.frame
-            if let style = gateway?.fullscreenStyle, style.isFullscreen {
-                self.fullscreenMode = style.fullscreenMode
-            } else {
-                self.fullscreenMode = fullscreenMode
-            }
             requestFocus = gateway?.suspendPresentation() ?? false
         }
     }
@@ -44,7 +38,7 @@ final class TmuxWindows {
             if let existing = sessions[info.session] {
                 session = existing
             } else if info.node_count > 0 {
-                session = Session(parent: info.parent, fullscreenMode: app.config.windowFullscreen)
+                session = Session(parent: info.parent)
                 sessions[info.session] = session
             } else {
                 continue
@@ -74,11 +68,12 @@ final class TmuxWindows {
            let controller = session.windows[selected] {
             controller.window?.makeKeyAndOrderFront(nil)
         }
-        if !isTerminating, let mode = session.fullscreenMode {
+        if !isTerminating {
             for id in session.pendingFullscreen {
-                guard let controller = session.windows[id],
+                guard let window = session.windows[id]?.window,
+                      let controller = (window.tabGroup?.selectedWindow ?? window).windowController as? TerminalController,
                       controller.fullscreenStyle?.isFullscreen != true else { continue }
-                controller.toggleFullscreen(mode: mode)
+                controller.toggleFullscreen(mode: .native)
             }
         }
         session.pendingFullscreen.removeAll()
@@ -169,7 +164,7 @@ final class TmuxWindows {
         controller.apply(info, layout: layout,
                          sibling: sibling, after: after, created: created,
                          frame: first ? session.frame : nil)
-        if created && sibling == nil { session.pendingFullscreen.append(id.window) }
+        if created && sibling == nil && app.config.tmuxFullscreen { session.pendingFullscreen.append(id.window) }
         return true
     }
 }

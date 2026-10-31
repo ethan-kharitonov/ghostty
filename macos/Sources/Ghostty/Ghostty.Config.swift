@@ -292,6 +292,13 @@ extension Ghostty {
         /// Returns the fullscreen mode if fullscreen is enabled, or nil if disabled.
         /// This parses the `fullscreen` enum config which supports both
         /// native and non-native fullscreen modes.
+        var tmuxFullscreen: Bool {
+            guard let config else { return false }
+            var value = false
+            let key = "tmux-fullscreen"
+            return ghostty_config_get(config, &value, key, UInt(key.utf8.count)) && value
+        }
+
         var windowFullscreen: FullscreenMode? {
             guard let config = self.config else { return nil }
             var v: UnsafePointer<Int8>?

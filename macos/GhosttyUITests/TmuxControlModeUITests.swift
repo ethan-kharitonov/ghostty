@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import ApplicationServices
 
 final class TmuxControlModeUITests: XCTestCase {
     private var app: XCUIApplication!
@@ -30,6 +31,28 @@ final class TmuxControlModeUITests: XCTestCase {
         app?.terminate()
         if socket != nil { _ = try? tmux(["kill-server"]) }
         if let config { try? FileManager.default.removeItem(at: config) }
+    }
+
+    @MainActor
+    func testFullScreenAttachUsesTheSelectedNativeTab() throws {
+        let base = try String(contentsOf: config, encoding: .utf8)
+        try (base + "\nfullscreen = false\ntmux-fullscreen = true\n")
+            .write(to: config, atomically: true, encoding: .utf8)
+        try tmux(["new-window", "-t", "native", "-n", "Second", "exec cat"])
+        try tmux(["split-window", "-h", "-t", "native:1", "exec cat"])
+        launchConnectedTerminal(windowTitle: "Second")
+        let process = try XCTUnwrap(NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first)
+        var windows: CFTypeRef?
+        XCTAssertEqual(AXUIElementCopyAttributeValue(AXUIElementCreateApplication(process.processIdentifier),
+                                                    kAXWindowsAttribute as CFString, &windows), .success)
+        let window = try XCTUnwrap((windows as? [AXUIElement])?.first { candidate in
+            var title: CFTypeRef?
+            return AXUIElementCopyAttributeValue(candidate, kAXTitleAttribute as CFString, &title) == .success
+                && title as? String == "Second"
+        })
+        var fullscreen: CFTypeRef?
+        XCTAssertEqual(AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &fullscreen), .success)
+        XCTAssertEqual(fullscreen as? Bool, true)
     }
 
     @MainActor
@@ -245,9 +268,9 @@ final class TmuxControlModeUITests: XCTestCase {
     }
 
     @MainActor
-    private func launchConnectedTerminal() {
+    private func launchConnectedTerminal(windowTitle: String = "First") {
         app.launch()
-        XCTAssertTrue(app.windows["First"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.windows[windowTitle].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.groups["Right pane"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(app.windows.count, 1, app.debugDescription)
     }
