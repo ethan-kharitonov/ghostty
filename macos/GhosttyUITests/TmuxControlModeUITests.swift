@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 
 final class TmuxControlModeUITests: XCTestCase {
     private var app: XCUIApplication!
@@ -9,9 +10,9 @@ final class TmuxControlModeUITests: XCTestCase {
         continueAfterFailure = false
         socket = "ghostty-test-\(UUID().uuidString)"
         config = FileManager.default.temporaryDirectory.appendingPathComponent(socket)
-        try tmux(["new-session", "-d", "-s", "native", "-n", "First", "-x", "100", "-y", "30"])
+        try tmux(["new-session", "-d", "-s", "native", "-n", "First", "-x", "100", "-y", "30", "exec cat"])
         try tmux(["set-option", "-t", "native", "automatic-rename", "off"])
-        try tmux(["split-window", "-h", "-t", "native:0"])
+        try tmux(["split-window", "-h", "-t", "native:0", "exec cat"])
         try """
         command = /opt/homebrew/bin/tmux -L \(socket!) -CC attach-session -t native
         confirm-close-surface = false
@@ -65,6 +66,35 @@ final class TmuxControlModeUITests: XCTestCase {
         XCTAssertTrue(app.windows["Second"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.windows.firstMatch.title, "Second")
         XCTAssertEqual(try tmux(["capture-pane", "-p", "-t", "native:1"]), "waiting")
+    }
+
+    @MainActor
+    func testAttachRestoresTheActiveAlternateScreen() throws {
+        try tmux(["respawn-pane", "-k", "-t", "native:0.1",
+                  "printf 'PRIMARY\\033[?1049hALTERNATE'; exec cat"])
+        waitForServerOutput(["capture-pane", "-p", "-t", "native:0.1"], equals: "ALTERNATE")
+        launchConnectedTerminal()
+        XCTAssertEqual(selectedText().trimmingCharacters(in: .whitespacesAndNewlines), "ALTERNATE")
+    }
+
+    @MainActor
+    func testAttachRestoresScrollback() throws {
+        let expected = (1...80).map { "history-\($0)" }
+        try tmux(["respawn-pane", "-k", "-t", "native:0.1",
+                  "i=1; while [ \"$i\" -le 80 ]; do printf 'history-%s\\n' \"$i\"; i=$((i+1)); done; exec cat"])
+        waitForServerOutput(["capture-pane", "-p", "-S", "-", "-t", "native:0.1"],
+                            equals: expected.joined(separator: "\n"))
+        launchConnectedTerminal()
+        let lines = selectedText().split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines, expected)
+    }
+
+    @MainActor
+    private func selectedText() -> String {
+        NSPasteboard.general.clearContents()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeKey("c", modifierFlags: .command)
+        return NSPasteboard.general.string(forType: .string) ?? ""
     }
 
     @MainActor

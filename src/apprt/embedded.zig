@@ -290,6 +290,11 @@ pub const App = struct {
 
     /// Close the given surface.
     pub fn closeSurface(self: *App, surface: *Surface) void {
+        // The host frees views during layout changes and failed construction,
+        // too. Only explicit tmux actions may terminate a remote program.
+        if (surface.tmuxPane() != null) {
+            if (self.core_app.tmux) |*session| session.releaseSurface(&surface.core_surface);
+        }
         surface.deinit();
         self.core_app.alloc.destroy(surface);
     }

@@ -372,12 +372,12 @@ pub const Viewer = struct {
     /// See `restore`. The contents are decoded and owned by the viewer.
     const PendingRestore = struct {
         pane_id: usize,
-        primary: []u8 = &.{},
-        alternate: []u8 = &.{},
+        current: []u8 = &.{},
+        saved: []u8 = &.{},
 
         fn deinit(self: *PendingRestore, alloc: Allocator) void {
-            alloc.free(self.primary);
-            alloc.free(self.alternate);
+            alloc.free(self.current);
+            alloc.free(self.saved);
         }
     };
 
@@ -1768,7 +1768,7 @@ pub const Viewer = struct {
         switch (cap.screen_key) {
             .primary => {
                 if (self.restore) |*v| v.deinit(self.alloc);
-                self.restore = .{ .pane_id = cap.id, .primary = decoded };
+                self.restore = .{ .pane_id = cap.id, .current = decoded };
             },
             .alternate => {
                 const restore = if (self.restore) |*v| v else null;
@@ -1776,8 +1776,8 @@ pub const Viewer = struct {
                     self.alloc.free(decoded);
                     return;
                 }
-                self.alloc.free(restore.?.alternate);
-                restore.?.alternate = decoded;
+                self.alloc.free(restore.?.saved);
+                restore.?.saved = decoded;
             },
         }
     }
@@ -1814,12 +1814,16 @@ pub const Viewer = struct {
         state.cursor_colour = try arena_alloc.dupe(u8, state.cursor_colour);
         state.pane_tabs = try arena_alloc.dupe(u8, state.pane_tabs);
 
-        try actions.append(arena_alloc, .{ .pane_restore = .{
-            .pane_id = id,
-            .primary = try arena_alloc.dupe(u8, restore.primary),
-            .alternate = try arena_alloc.dupe(u8, restore.alternate),
-            .state = state,
-        } });
+        try actions.append(arena_alloc, .{
+            .pane_restore = .{
+                .pane_id = id,
+                // capture-pane reads the active grid; -a reads the saved grid.
+                // Their logical screen identities follow alternate_on.
+                .primary = try arena_alloc.dupe(u8, if (state.alternate_on) restore.saved else restore.current),
+                .alternate = try arena_alloc.dupe(u8, if (state.alternate_on) restore.current else restore.saved),
+                .state = state,
+            },
+        });
     }
 
     /// Write the bytes that make a fresh view of a pane look the way
@@ -2147,8 +2151,8 @@ const Command = union(enum) {
     /// sent: it only ever takes the place of a command that was.
     stale,
 
-    /// Capture the visible contents of one screen of a pane so that a
-    /// newly created view of it isn't blank. The pane ID is carried here
+    /// Capture one grid and its history so a newly created view retains
+    /// the pane's contents. The pane ID is carried here
     /// because the output doesn't identify itself.
     follower_capture: CapturePane,
 
@@ -2277,7 +2281,7 @@ const Command = union(enum) {
                 // later, which rows broken at the width of the capture
                 // can't do. -q so that a pane without an alternate screen
                 // answers with nothing.
-                "capture-pane -p -e -C -J -q{s} -t %{d}\n",
+                "capture-pane -p -e -C -J -q{s} -t %{d} -S -\n",
                 .{ if (cap.screen_key == .alternate) " -a" else "", cap.id },
             ),
 
@@ -3934,11 +3938,11 @@ test "pane restore gathers both screens and the state" {
     const first = viewer.capturePane(0);
     try testing.expect(std.mem.startsWith(u8, testCommand(first).?, "capture-pane -p -e -C -J -q -t %0"));
     {
-        const actions = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "one\\134two\ntwo\n" } } });
+        const actions = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "vim\n" } } });
         try testing.expect(std.mem.startsWith(u8, testCommand(actions).?, "capture-pane -p -e -C -J -q -a -t %0"));
     }
     {
-        const actions = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "vim\n" } } });
+        const actions = viewer.next(.{ .tmux = .{ .block_end = .{ .data = "one\\134two\ntwo\n" } } });
         try testing.expect(std.mem.startsWith(u8, testCommand(actions).?, "display-message -p -t %0 -F '"));
     }
     const actions = viewer.next(.{ .tmux = .{ .block_end = .{
