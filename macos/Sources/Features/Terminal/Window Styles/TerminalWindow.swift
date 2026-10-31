@@ -21,7 +21,19 @@ class TerminalWindow: NSWindow {
     private let sessionStatusView = TerminalStatusView()
 
     var sessionStatus: TerminalStatus? {
-        didSet { sessionStatusView.status = sessionStatus }
+        didSet {
+            let wasHidden = sessionStatusView.isHidden
+            sessionStatusView.status = sessionStatus
+            if wasHidden != sessionStatusView.isHidden { refreshTabAccessory() }
+        }
+    }
+
+    private func refreshTabAccessory() {
+        guard let accessory = tab.accessoryView else { return }
+        // AppKit caches accessible children when the tab accessory is attached.
+        accessory.layoutSubtreeIfNeeded()
+        tab.accessoryView = nil
+        tab.accessoryView = accessory
     }
 
     /// Reset split zoom button in titlebar
@@ -365,6 +377,7 @@ class TerminalWindow: NSWindow {
             // Show/hide our reset zoom button depending on if we're zoomed.
             // We want to show it if we are zoomed.
             resetZoomTabButton.isHidden = !surfaceIsZoomed
+            if oldValue != surfaceIsZoomed { refreshTabAccessory() }
 
             DispatchQueue.main.async {
                 self.viewModel.isSurfaceZoomed = self.surfaceIsZoomed
