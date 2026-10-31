@@ -8,6 +8,12 @@ final class TmuxTerminalController: TerminalController {
         let window: UInt
     }
 
+    struct Layout {
+        let tree: SplitTree<Ghostty.SurfaceView>
+        let focused: Ghostty.SurfaceView?
+        let splitHandles: [UUID: UInt16]
+    }
+
     private let id: ID
     private var serial: UInt64 = 0
     private var splitHandles: [UUID: UInt16] = [:]
@@ -30,25 +36,22 @@ final class TmuxTerminalController: TerminalController {
     }
 
     func apply(_ info: ghostty_tmux_window_info_s,
-               tree: SplitTree<Ghostty.SurfaceView>,
-               focused: Ghostty.SurfaceView?, splitHandles: [UUID: UInt16],
-               sibling: NSWindow?, after: NSWindow?, created: Bool, gateway: NSWindow?) {
+               layout: Layout,
+               sibling: NSWindow?, after: NSWindow?, created: Bool, gateway: BaseTerminalController?) {
         applying = true
         defer {
             applying = false
             reportSize()
         }
+        let gatewayFrame = gateway?.window?.frame
+        let transferFocus = gateway?.suspendPresentation() ?? false
         serial = info.serial
-        self.splitHandles = splitHandles
-        surfaceTree = tree
+        self.splitHandles = layout.splitHandles
+        surfaceTree = layout.tree
         titleOverride = String(cString: info.title)
-        focusedSurface = focused
+        focusedSurface = layout.focused
         guard let window else { return }
-        let gatewayWasKey = gateway?.isKeyWindow ?? false
-        if let gateway {
-            window.setFrame(gateway.frame, display: false)
-            gateway.orderOut(nil)
-        }
+        if let gatewayFrame { window.setFrame(gatewayFrame, display: false) }
         if created {
             if let sibling {
                 _ = sibling.addTabbedWindowSafely(window, ordered: .above)
@@ -64,10 +67,10 @@ final class TmuxTerminalController: TerminalController {
             }
             if info.select { group.selectedWindow = window }
         }
-        if info.present || gatewayWasKey {
-            window.makeKeyAndOrderFront(nil)
-            if let focused { Ghostty.moveFocus(to: focused) }
-        }
+        syncAppearance()
+        if info.present || transferFocus { window.makeKeyAndOrderFront(nil) }
+        if window.isKeyWindow, let focused = layout.focused { Ghostty.moveFocus(to: focused) }
+        Ghostty.logger.debug("tmux presentation window=\(info.window) select=\(info.select) transferFocus=\(transferFocus) key=\(window.isKeyWindow)")
     }
 
     func closeFromServer() {

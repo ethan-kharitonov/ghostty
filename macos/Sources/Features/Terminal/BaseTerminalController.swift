@@ -97,6 +97,8 @@ class BaseTerminalController: NSWindowController,
     /// Cancellable for aggregating bell state across all surfaces in this controller.
     private var bellStateCancellable: AnyCancellable?
     private var sessionStatusCancellable: AnyCancellable?
+    private var menuExclusionBeforeSuspending: Bool?
+    var presentationSuspended: Bool { menuExclusionBeforeSuspending != nil }
     private var sessionStatus: TerminalStatus? {
         didSet { (window as? TerminalWindow)?.sessionStatus = sessionStatus }
     }
@@ -1162,6 +1164,32 @@ class BaseTerminalController: NSWindowController,
 
         // Always resync our appearance
         syncAppearance()
+    }
+
+    /// Hide a live connection surface and return whether its replacement should inherit focus.
+    @discardableResult
+    func suspendPresentation() -> Bool {
+        let wasKey = window?.isKeyWindow ?? false
+        if menuExclusionBeforeSuspending == nil {
+            menuExclusionBeforeSuspending = window?.isExcludedFromWindowsMenu ?? false
+        }
+        window?.isExcludedFromWindowsMenu = true
+        if let window, let group = window.tabGroup, group.windows.count > 1 {
+            group.removeWindow(window)
+        }
+        window?.orderOut(nil)
+        return wasKey
+    }
+
+    func resumePresentation(focus: Bool) {
+        guard let excluded = menuExclusionBeforeSuspending else { return }
+        menuExclusionBeforeSuspending = nil
+        window?.isExcludedFromWindowsMenu = excluded
+        if focus {
+            window?.makeKeyAndOrderFront(nil)
+        } else {
+            window?.orderFront(nil)
+        }
     }
 
     // MARK: NSWindowController

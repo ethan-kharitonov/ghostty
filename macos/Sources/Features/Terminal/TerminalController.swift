@@ -145,6 +145,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         center.removeObserver(self)
     }
 
+    override func suspendPresentation() -> Bool {
+        let pending = pendingInitialPresentation != nil
+        cancelPendingInitialPresentation()
+        return super.suspendPresentation() || pending
+    }
+
     private func cancelPendingInitialPresentation() {
         pendingInitialPresentation?.cancel()
         pendingInitialPresentation = nil
@@ -564,6 +570,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // Update our derived config
             self.derivedConfig = DerivedConfig(config)
             syncRestoration(config)
+            syncTabBar()
 
             // If we have no surfaces in our window (is that possible?) then we update
             // our window appearance based on the root config. If we have surfaces, we
@@ -593,6 +600,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// changes, when a window is closed, and when tabs are reordered
     /// with the mouse.
     func relabelTabs() {
+        syncTabBar()
         // We only listen for frame changes if we have more than 1 window,
         // otherwise the accessory view doesn't matter.
         tabListenForFrame = window?.tabbedWindows?.count ?? 0 > 1
@@ -613,6 +621,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
             }
         }
+    }
+
+    private func syncTabBar() {
+        guard isWindowLoaded, let window, window.isVisible,
+              window.styleMask.contains(.titled) else { return }
+        let group = window.tabGroup
+        let visible: Bool
+        switch derivedConfig.windowShowTabBar {
+        case "always": visible = true
+        case "never": visible = false
+        default: visible = (group?.windows.count ?? 1) > 1
+        }
+        if (group?.isTabBarVisible ?? false) != visible { window.toggleTabBar(nil) }
     }
 
     private func fixTabBar() {
@@ -665,6 +686,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Call this last in case it uses any of the properties above.
         window.syncAppearance(surfaceConfig)
+        syncTabBar()
         terminalViewContainer?.ghosttyConfigDidChange(ghostty.config, preferredBackgroundColor: window.preferredBackgroundColor)
     }
 
@@ -1174,6 +1196,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     /// Setup correct window frame before showing the window
     override func showWindow(_ sender: Any?) {
+        guard !presentationSuspended else { return }
         guard let terminalWindow = window as? TerminalWindow else { return }
 
         // Set the initial window position. This must happen after the window
@@ -1722,6 +1745,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let maximize: Bool
         let windowPositionX: Int16?
         let windowPositionY: Int16?
+        let windowShowTabBar: String
 
         init() {
             self.backgroundColor = Color(NSColor.windowBackgroundColor)
@@ -1730,6 +1754,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             self.maximize = false
             self.windowPositionX = nil
             self.windowPositionY = nil
+            self.windowShowTabBar = "auto"
         }
 
         init(_ config: Ghostty.Config) {
@@ -1739,6 +1764,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             self.maximize = config.maximize
             self.windowPositionX = config.windowPositionX
             self.windowPositionY = config.windowPositionY
+            self.windowShowTabBar = config.windowShowTabBar
         }
     }
 }

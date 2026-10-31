@@ -8,9 +8,9 @@
 //! Writes cross the thread boundary through the surface mailbox rather
 //! than reaching into the session directly, because the session is owned
 //! by the app thread. Output goes the other way through `queueOutput`,
-//! which only appends to a buffer: the app thread drains its own mailbox,
-//! so it must never wait on a follower. A reader thread parses the
-//! buffer, as the exec backend's read thread does with its pty. Parsing
+//! which accepts chunks charged to the gateway's output budget. The app
+//! thread drains its own mailbox, so it must never wait on a follower.
+//! A reader thread parses the chunks and releases their budget afterwards. Parsing
 //! on the IO thread instead would deadlock it on its own mailbox, which
 //! the stream handler fills with replies while it parses.
 
@@ -21,6 +21,8 @@ const global = @import("../global.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
+const Output = @import("tmux_output.zig");
+const TitleFilter = @import("tmux_title.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.io_tmux);
@@ -33,10 +35,11 @@ alloc: Allocator,
 pane_id: usize,
 
 /// Pane output the app thread handed us that the reader thread hasn't
-/// processed yet. See queueOutput. `quit` tells the reader thread to
-/// stop. All three are guarded by `output_mutex`.
-output: std.ArrayList(u8) = .empty,
-quit: bool = false,
+/// processed yet, guarded by `output_mutex`. `quit` is atomic so the reader
+/// can stop between chunks without taking that mutex.
+output: std.ArrayList(Output) = .empty,
+title_filter: TitleFilter = .{},
+quit: std.atomic.Value(bool) = .init(false),
 output_mutex: std.Io.Mutex = .init,
 output_cond: std.Io.Condition = .init,
 
@@ -53,15 +56,21 @@ pub fn init(alloc: Allocator, pane_id: usize) Tmux {
 }
 
 pub fn deinit(self: *Tmux) void {
+    for (self.output.items) |*output| output.deinit();
     self.output.deinit(self.alloc);
 }
 
 /// Queue pane output for the reader thread. Safe to call from any
-/// thread; it only appends, so the caller never waits on the reader.
-pub fn queueOutput(self: *Tmux, data: []const u8) Allocator.Error!void {
+/// thread; it takes ownership even on failure and never waits on the reader.
+pub fn queueOutput(self: *Tmux, output: Output) Allocator.Error!void {
+    errdefer output.deinit();
     self.output_mutex.lockUncancelable(global.io());
     defer self.output_mutex.unlock(global.io());
-    try self.output.appendSlice(self.alloc, data);
+    if (self.quit.load(.acquire)) {
+        output.deinit();
+        return;
+    }
+    try self.output.append(self.alloc, output);
     self.output_cond.signal(global.io());
 }
 
@@ -71,17 +80,30 @@ fn readerMain(self: *Tmux, io: *termio.Termio) void {
         var output = output: {
             self.output_mutex.lockUncancelable(global.io());
             defer self.output_mutex.unlock(global.io());
-            while (self.output.items.len == 0 and !self.quit) {
+            while (self.output.items.len == 0 and !self.quit.load(.acquire)) {
                 self.output_cond.waitUncancelable(global.io(), &self.output_mutex);
             }
-            if (self.quit) return;
+            if (self.quit.load(.acquire)) return;
 
             const output = self.output;
             self.output = .empty;
             break :output output;
         };
         defer output.deinit(self.alloc);
-        io.processOutput(output.items);
+        for (output.items) |*chunk| {
+            defer chunk.deinit();
+            if (self.quit.load(.acquire)) continue;
+            var buffer: [Output.max_chunk + TitleFilter.max_expansion]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            self.title_filter.filter(chunk.bytes(), &writer) catch unreachable;
+            if (std.mem.indexOf(u8, chunk.bytes(), "\x1b]7501;?") != null) {
+                log.info("parsing program status query pane=%{d} preserved={}", .{
+                    self.pane_id,
+                    std.mem.indexOf(u8, writer.buffered(), "\x1b]7501;?") != null,
+                });
+            }
+            if (writer.buffered().len > 0) io.processOutput(writer.buffered());
+        }
     }
 }
 
@@ -120,7 +142,7 @@ pub fn threadExit(self: *Tmux, td: *termio.Termio.ThreadData) void {
     {
         self.output_mutex.lockUncancelable(global.io());
         defer self.output_mutex.unlock(global.io());
-        self.quit = true;
+        self.quit.store(true, .release);
         self.output_cond.signal(global.io());
     }
     td.backend.tmux.reader.join();
@@ -169,7 +191,10 @@ pub fn queueWrite(
 }
 
 fn send(self: *Tmux, msg: apprt.surface.Message) void {
-    var mailbox = self.surface_mailbox orelse return;
+    var mailbox = self.surface_mailbox orelse {
+        msg.discard();
+        return;
+    };
     _ = mailbox.push(msg, .{ .forever = {} });
 }
 

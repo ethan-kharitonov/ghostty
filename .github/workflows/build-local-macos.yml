@@ -52,6 +52,21 @@ jobs:
       - name: Install build dependencies
         run: brew install gettext tmux
 
+      - name: Check changed Swift code
+        run: |
+          curl --fail --location https://github.com/realm/SwiftLint/releases/download/0.65.1/portable_swiftlint.zip -o "$RUNNER_TEMP/swiftlint.zip"
+          printf '%s  %s\n' c1e429b0599cf1b516f369a2d9ec04eaf0e436f3c12b637df8851fa52ff694d0 "$RUNNER_TEMP/swiftlint.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/swiftlint.zip" -d "$RUNNER_TEMP/swiftlint"
+          git fetch --no-tags --depth=1 origin main
+          export DYLD_FRAMEWORK_PATH="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          python3 - "$RUNNER_TEMP/swiftlint/swiftlint" <<'PYTHON'
+          import os, subprocess, sys
+          changed = subprocess.check_output(["git", "diff", "--name-only", "--diff-filter=ACM", "-z", "FETCH_HEAD", "HEAD", "--", "*.swift"])
+          paths = [os.fsdecode(path) for path in changed.split(b"\0") if path]
+          if paths:
+              subprocess.run([sys.argv[1], "lint", "--strict", *paths], check=True)
+          PYTHON
+
       - name: Build app and UI tests
         id: build_app
         run: |

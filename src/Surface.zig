@@ -194,10 +194,6 @@ last_bell_time: ?std.Io.Timestamp = null,
 /// follower. Followers have no pty of their own.
 tmux_pane_id: ?usize = null,
 
-/// Drops screen's title sequence from the pane output. See
-/// TmuxTitleFilter.
-tmux_title: TmuxTitleFilter = .{},
-
 /// The terminal grid tmux gives this follower's pane, when it decides
 /// the grid rather than the surface size. The surface can be bigger than
 /// the grid, so positions on it are clamped to the grid.
@@ -5512,6 +5508,9 @@ fn tmuxSendKeys(self: *Surface, req: apprt.surface.Message.WriteReq) void {
 
     const session = if (self.app.tmux) |*s| s else return;
     const pane = session.paneForSurface(self) orelse return;
+    if (std.mem.startsWith(u8, req.slice(), "\x1b]7501;?")) {
+        log.info("sending program status reply pane=%{d}", .{pane});
+    }
     session.sendKeys(pane, req.slice());
 }
 
@@ -5529,102 +5528,18 @@ fn tmuxResize(self: *Surface, grid_size: rendererpkg.GridSize) void {
 }
 
 /// Inject pane output into the follower surface that mirrors the pane.
-fn tmuxOutput(self: *Surface, req: apprt.surface.Message.WriteReq) void {
-    defer req.deinit();
-    if (comptime !terminal.options.tmux_control_mode) return;
-
-    const slice = req.slice();
-    if (slice.len < @sizeOf(u64)) return;
-    const pane_id = std.mem.readInt(u64, slice[0..@sizeOf(u64)], .little);
-    const data = slice[@sizeOf(u64)..];
-    if (data.len == 0) return;
-
-    const session = self.tmuxGatewaySession() orelse return;
-    const surface = session.surfaceForPane(@intCast(pane_id)) orelse return;
-
-    var stack_buf: [4096]u8 = undefined;
-    var stack: std.heap.BufferFirstAllocator = .init(&stack_buf, surface.alloc);
-    const alloc = stack.allocator();
-    var buf: std.Io.Writer.Allocating = .init(alloc);
-    defer buf.deinit();
-
-    // The follower's reader thread parses the output (see termio.Tmux).
-    // Parsing it here on the app thread would deadlock as soon as the
-    // follower's stream handler waits for room in the app mailbox, which
-    // only this thread drains.
-    surface.tmux_title.filter(data, &buf.writer) catch {
-        // Showing the title text is better than dropping the output.
-        surface.io.tmuxQueueOutput(data);
-        return;
-    };
-
-    surface.io.tmuxQueueOutput(buf.writer.buffered());
-}
-
-/// Drops `ESC k <title> ESC \` from pane output.
-///
-/// tmux advertises a screen-compatible terminal to the programs in its
-/// panes, so they set the window title with screen's sequence rather
-/// than with OSC. tmux consumes it for its own clients but control mode
-/// hands the pane's bytes over untouched, and we'd print the title as
-/// if it were output.
-///
-/// The state is per-surface because a pane's output arrives in whatever
-/// chunks tmux read it in, so a sequence can straddle two of them.
-const TmuxTitleFilter = struct {
-    state: enum { ground, escape, string, string_escape } = .ground,
-
-    /// Bytes of the current title dropped so far.
-    len: usize = 0,
-
-    /// After this many bytes the title is over even without its end, so
-    /// that an `ESC k` that is never terminated can't drop all of a
-    /// pane's later output.
-    const max_len = 1024;
-
-    fn filter(
-        self: *TmuxTitleFilter,
-        data: []const u8,
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        for (data) |byte| switch (self.state) {
-            .ground => if (byte == 0x1b) {
-                self.state = .escape;
-            } else {
-                try writer.writeByte(byte);
-            },
-
-            .escape => switch (byte) {
-                'k' => {
-                    self.state = .string;
-                    self.len = 0;
-                },
-
-                // ESC ESC: the first one still isn't ours.
-                0x1b => try writer.writeByte(0x1b),
-
-                else => {
-                    self.state = .ground;
-                    try writer.writeByte(0x1b);
-                    try writer.writeByte(byte);
-                },
-            },
-
-            // BEL terminates too: it's what the OSC form of this uses and
-            // some shells reuse the same title string for both.
-            .string, .string_escape => {
-                self.state = switch (byte) {
-                    0x07 => .ground,
-                    0x1b => .string_escape,
-                    '\\' => if (self.state == .string_escape) .ground else .string,
-                    else => .string,
-                };
-                self.len += 1;
-                if (self.len >= max_len) self.state = .ground;
-            },
-        };
+fn tmuxOutput(self: *Surface, output: termio.TmuxOutput) void {
+    const session: ?*TmuxSession.Session = if (comptime terminal.options.tmux_control_mode) self.tmuxGatewaySession() else null;
+    const surface = if (session) |gateway| gateway.surfaceForPane(output.pane_id) else null;
+    if (std.mem.indexOf(u8, output.bytes(), "\x1b]7501;?") != null) {
+        log.info("routing program status query pane=%{d} has_surface={}", .{ output.pane_id, surface != null });
     }
-};
+    if (surface) |follower| {
+        follower.io.tmuxQueueOutput(output);
+    } else {
+        output.deinit();
+    }
+}
 
 /// Drop the session and close every follower. The gateway stays.
 pub fn tmuxTeardown(self: *Surface) void {
@@ -7496,25 +7411,4 @@ test "promptClickRelativeRow" {
         );
         try testing.expectEqual(case.expected, promptClickRelativeRow(&pages, prompt, click));
     }
-}
-
-test "tmux title filter" {
-    const testing = std.testing;
-
-    var buf: [4096]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buf);
-    var f: TmuxTitleFilter = .{};
-
-    // Ended by ST or BEL, also when split across chunks, and anything else
-    // after ESC passes through.
-    try f.filter("a\x1bkone\x1b\\b\x1bktwo\x07c\x1b\x1bkthr", &writer);
-    try f.filter("ee\x1b\\d\x1b[1m", &writer);
-    try testing.expectEqualStrings("abc\x1bd\x1b[1m", writer.buffered());
-
-    // A title that never ends stops being one after max_len bytes.
-    writer = .fixed(&buf);
-    try f.filter("\x1bk", &writer);
-    for (0..TmuxTitleFilter.max_len + 3) |_| try f.filter("x", &writer);
-    try f.filter("tail", &writer);
-    try testing.expectEqualStrings("xxxtail", writer.buffered());
 }

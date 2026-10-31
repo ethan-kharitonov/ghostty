@@ -158,6 +158,10 @@ pub fn deinit(self: *App) void {
     // Clean up all our surfaces
     for (self.surfaces.items) |surface| surface.deinit();
     self.surfaces.deinit(self.alloc);
+    while (self.mailbox.pop(global.io())) |message| switch (message) {
+        .surface_message => |pending| pending.message.discard(),
+        else => {},
+    };
 
     // Clean up our font group cache
     // We should have zero items in the grid set at this point because
@@ -559,25 +563,7 @@ fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !vo
         return;
     }
 
-    // Window was not found, it probably quit before we handled the message.
-    // Release payloads whose intended receiver no longer exists.
-    switch (msg) {
-        .session_status => |update| switch (update) {
-            .iterm => |body| body.deinit(),
-            .program => |report| report.body.deinit(),
-            .reset, .end_command => {},
-        },
-        .kitty_clipboard_read => |v| v.destroy(),
-        .kitty_clipboard_write => |v| v.destroy(),
-        .clipboard_write => |v| v.req.deinit(),
-        .tmux_windows => |v| v.destroy(),
-        .pwd_change,
-        .tmux_window_renamed,
-        .tmux_output,
-        .tmux_send_keys,
-        => |v| v.deinit(),
-        else => {},
-    }
+    msg.discard();
 }
 
 fn hasSurface(self: *const App, surface: *const Surface) bool {

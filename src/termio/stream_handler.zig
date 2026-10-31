@@ -97,6 +97,8 @@ pub const StreamHandler = struct {
     /// True once the control plate force-quit the session. tmux keeps
     /// talking to us but we no longer listen.
     tmux_abandoned: bool = false,
+    tmux_output_budget: ?*termio.TmuxOutput.Budget = null,
+    tmux_output_stopped: bool = false,
 
     /// True for a tmux control mode follower. tmux is the terminal of
     /// record for the pane and already answered every query in its
@@ -130,6 +132,7 @@ pub const StreamHandler = struct {
     pub const tmux_enabled = terminal.options.tmux_control_mode;
 
     pub fn deinit(self: *StreamHandler) void {
+        if (self.tmux_output_budget) |budget| budget.release();
         self.apc.deinit();
         self.dcs.deinit();
         self.kittyClipboardWriteAbort();
@@ -143,6 +146,13 @@ pub const StreamHandler = struct {
             self.alloc.destroy(viewer);
             self.tmux_viewer = null;
         }
+    }
+
+    pub fn cancelTmuxOutput(self: *StreamHandler) void {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        self.tmux_output_stopped = true;
+        if (self.tmux_output_budget) |budget| budget.close();
     }
 
     /// This queues a render operation with the renderer thread. The render
@@ -507,7 +517,11 @@ pub const StreamHandler = struct {
                     // mirrors the pane, which lives on the app thread.
                     .output => |out| output: {
                         const viewer = self.tmux_viewer orelse break :output;
-                        if (!viewer.canForwardOutput(out.pane_id)) break :output;
+                        const ready = viewer.canForwardOutput(out.pane_id);
+                        if (std.mem.indexOf(u8, out.data, "]7501;?") != null) {
+                            log.info("program status query pane=%{d} ready={}", .{ out.pane_id, ready });
+                        }
+                        if (!ready) break :output;
                         self.tmuxForwardOutput(out.pane_id, out.data, .escaped);
                     },
 
@@ -538,7 +552,7 @@ pub const StreamHandler = struct {
                 const actions = viewer.next(.{ .tmux = tmux });
                 const session_id = viewer.session_id;
                 for (actions) |action| {
-                    log.info("tmux viewer action={f}", .{action});
+                    log.info("tmux viewer action={t}", .{std.meta.activeTag(action)});
                     // The viewer never sees %exit (that is handled above),
                     // so this means it gave up on its own. Tearing it down
                     // frees what we're iterating, so leave the loop.
@@ -682,37 +696,44 @@ pub const StreamHandler = struct {
         data: []const u8,
         encoding: enum { escaped, decoded },
     ) void {
-        if (data.len == 0) return;
+        if (data.len == 0 or self.tmux_output_stopped) return;
 
+        if (self.tmux_output_budget == null) {
+            self.tmux_output_budget = termio.TmuxOutput.Budget.create(self.alloc, 4 * 1024 * 1024) catch |err| {
+                log.warn("failed to create tmux output budget err={}", .{err});
+                return;
+            };
+        }
         var stack_buf: [1024]u8 = undefined;
         var stack: std.heap.BufferFirstAllocator = .init(&stack_buf, self.alloc);
         const alloc = stack.allocator();
-        const payload = alloc.alloc(u8, @sizeOf(u64) + data.len) catch {
-            log.warn("failed to allocate tmux pane output", .{});
+        const copy = alloc.dupe(u8, data) catch |err| {
+            log.warn("failed to copy tmux pane output err={}", .{err});
             return;
         };
-        defer alloc.free(payload);
-        std.mem.writeInt(u64, payload[0..@sizeOf(u64)], pane_id, .little);
-        @memcpy(payload[@sizeOf(u64)..], data);
-
-        // The parser leaves `%output` escaped, and decoding never grows
-        // the data, so the copy is decoded in place.
-        const body = payload[@sizeOf(u64)..];
-        const decoded = switch (encoding) {
-            .escaped => terminal.tmux.unescape(body),
-            .decoded => body,
+        defer alloc.free(copy);
+        var remaining: []const u8 = switch (encoding) {
+            .escaped => terminal.tmux.unescape(copy),
+            .decoded => copy,
         };
-        if (decoded.len == 0) return;
-
-        const req = apprt.surface.Message.WriteReq.init(
-            self.alloc,
-            payload[0 .. @sizeOf(u64) + decoded.len],
-        ) catch |err| {
-            log.warn("failed to queue tmux pane output err={}", .{err});
-            return;
-        };
-
-        self.surfaceMessageWriter(.{ .tmux_output = req });
+        while (remaining.len > 0) {
+            const size = @min(remaining.len, termio.TmuxOutput.max_chunk);
+            const output = (termio.TmuxOutput.create(
+                self.tmux_output_budget.?,
+                pane_id,
+                remaining[0..size],
+                self.renderer_state.mutex,
+            ) catch |err| {
+                log.warn("failed to queue tmux pane output err={}", .{err});
+                return;
+            }) orelse return;
+            if (self.tmux_output_stopped) {
+                output.deinit();
+                return;
+            }
+            self.surfaceMessageWriter(.{ .tmux_output = output });
+            remaining = remaining[size..];
+        }
     }
 
     /// Show a pane's captured screens and modes in its follower surface.
@@ -2401,6 +2422,7 @@ pub const StreamHandler = struct {
                 inline else => |ending| {
                     // Unlike terminal-grid queries, this protocol is handled by
                     // the frontend, so tmux followers must answer it themselves.
+                    log.info("answering program status query follower={}", .{self.tmux_follower});
                     self.termio_mailbox.send(try termio.Message.writeReq(
                         self.alloc,
                         "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ comptime ending.string(),

@@ -406,7 +406,7 @@ pub fn threadEnter(
 
     // Setup our backend
     try self.backend.threadEnter(self.alloc, self, data);
-    errdefer self.backend.threadExit(data);
+    errdefer self.threadExit(data);
 
     // If we have inputs, then queue them all up.
     for (inputs orelse &.{}) |input| switch (input) {
@@ -434,6 +434,7 @@ pub fn threadEnter(
 }
 
 pub fn threadExit(self: *Termio, data: *ThreadData) void {
+    self.terminal_stream.handler.cancelTmuxOutput();
     self.backend.threadExit(data);
 }
 
@@ -738,12 +739,12 @@ pub fn tmuxWrite(self: *Termio, td: *ThreadData, data: []const u8) void {
 
 /// Queue tmux pane output for a follower. Safe to call from any thread;
 /// it never waits on the follower (see termio.Tmux).
-pub fn tmuxQueueOutput(self: *Termio, data: []const u8) void {
+pub fn tmuxQueueOutput(self: *Termio, output: termio.TmuxOutput) void {
     switch (self.backend) {
-        .tmux => |*tmux| tmux.queueOutput(data) catch |err| {
+        .tmux => |*tmux| tmux.queueOutput(output) catch |err| {
             log.warn("error queueing tmux pane output err={}", .{err});
         },
-        else => {},
+        else => output.deinit(),
     }
 }
 

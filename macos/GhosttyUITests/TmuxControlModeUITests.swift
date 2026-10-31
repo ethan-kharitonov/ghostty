@@ -18,6 +18,7 @@ final class TmuxControlModeUITests: XCTestCase {
         confirm-close-surface = false
         window-save-state = never
         auto-update = off
+        window-show-tab-bar = always
         keybind = ctrl+shift+u=tmux_command:rename-window Shortcut
         keybind = ctrl+shift+p=coprocess:printf 'coprocess-input\\n'
         """.write(to: config, atomically: true, encoding: .utf8)
@@ -218,6 +219,7 @@ final class TmuxControlModeUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.windows["First"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.groups["Right pane"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(app.windows.count, 1, app.debugDescription)
     }
 
     private func waitForServerOutput(_ arguments: [String], equals expected: String) {

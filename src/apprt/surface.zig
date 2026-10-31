@@ -188,10 +188,8 @@ pub const Message = union(enum) {
     /// WriteReq memory.
     tmux_window_renamed: WriteReq,
 
-    /// Output for a tmux pane. The payload is the pane id as a
-    /// little-endian u64 followed by the raw bytes. The receiver owns the
-    /// WriteReq memory.
-    tmux_output: WriteReq,
+    /// Owned pane output whose budget is released after parsing or discard.
+    tmux_output: @import("../termio/tmux_output.zig"),
 
     /// Control mode ended, so the follower surfaces have to go away.
     tmux_exit: void,
@@ -203,6 +201,27 @@ pub const Message = union(enum) {
     /// A follower surface's grid size changed, so its tmux pane should
     /// follow.
     tmux_resize: renderer.GridSize,
+
+    /// Release an owned message that will not reach its surface.
+    pub fn discard(self: Message) void {
+        switch (self) {
+            .session_status => |update| switch (update) {
+                .iterm => |body| body.deinit(),
+                .program => |report| report.body.deinit(),
+                .reset, .end_command => {},
+            },
+            .kitty_clipboard_read => |v| v.destroy(),
+            .kitty_clipboard_write => |v| v.destroy(),
+            .clipboard_write => |v| v.req.deinit(),
+            .tmux_windows => |v| v.destroy(),
+            .tmux_output => |v| v.deinit(),
+            .pwd_change,
+            .tmux_window_renamed,
+            .tmux_send_keys,
+            => |v| v.deinit(),
+            else => {},
+        }
+    }
 
     pub const TmuxActivePane = struct {
         window_id: usize,

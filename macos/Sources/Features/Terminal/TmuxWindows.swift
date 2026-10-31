@@ -27,12 +27,13 @@ final class TmuxWindows {
             guard let session = sessions[id.session] else { return true }
             let controller = session.windows.removeValue(forKey: id.window)
             let frame = controller?.window?.frame
+            let wasKey = controller?.window?.isKeyWindow ?? false
             controller?.closeFromServer()
             if session.windows.isEmpty {
                 sessions.removeValue(forKey: id.session)
-                if !isTerminating, let gateway = session.gateway?.window {
-                    if let frame { gateway.setFrame(frame, display: false) }
-                    gateway.orderFront(nil)
+                if !isTerminating, let gateway = session.gateway {
+                    if let frame { gateway.window?.setFrame(frame, display: false) }
+                    gateway.resumePresentation(focus: wasKey)
                 }
             }
             return true
@@ -100,9 +101,9 @@ final class TmuxWindows {
         let after = info.has_after
             ? session.windows[info.after]?.window
             : nil
-        controller.apply(info, tree: tree, focused: focused, splitHandles: splitHandles,
+        controller.apply(info, layout: .init(tree: tree, focused: focused, splitHandles: splitHandles),
                          sibling: sibling, after: after, created: created,
-                         gateway: first ? session.gateway?.window : nil)
+                         gateway: first ? session.gateway : nil)
         return true
     }
 }
