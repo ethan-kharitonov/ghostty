@@ -1,0 +1,105 @@
+import XCTest
+
+final class TmuxControlModeUITests: XCTestCase {
+    private var app: XCUIApplication!
+    private var socket: String!
+    private var config: URL!
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        socket = "ghostty-test-\(UUID().uuidString)"
+        config = FileManager.default.temporaryDirectory.appendingPathComponent(socket)
+        try tmux(["new-session", "-d", "-s", "native", "-n", "First", "-x", "100", "-y", "30"])
+        try tmux(["set-option", "-t", "native", "automatic-rename", "off"])
+        try tmux(["split-window", "-h", "-t", "native:0"])
+        try """
+        command = /opt/homebrew/bin/tmux -L \(socket!) -CC attach-session -t native
+        confirm-close-surface = false
+        window-save-state = never
+        auto-update = off
+        """.write(to: config, atomically: true, encoding: .utf8)
+        app = XCUIApplication()
+        app.launchArguments = ["-ApplePersistenceIgnoreState", "YES"]
+        app.launchEnvironment["GHOSTTY_CONFIG_PATH"] = config.path
+        app.launchEnvironment["GHOSTTY_USER_DEFAULTS_SUITE"] = socket
+    }
+
+    override func tearDownWithError() throws {
+        app?.terminate()
+        if socket != nil { _ = try? tmux(["kill-server"]) }
+        if let config { try? FileManager.default.removeItem(at: config) }
+    }
+
+    @MainActor
+    func testNativeTabCreationCreatesServerWindow() throws {
+        launchConnectedTerminal()
+        app.typeKey("t", modifierFlags: .command)
+        waitForServerOutput(["display-message", "-p", "-t", "native", "#{session_windows}"], equals: "2")
+        try tmux(["rename-window", "-t", "native:1", "Second"])
+        XCTAssertTrue(app.windows["Second"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testNativePaneClosureClosesServerPane() throws {
+        launchConnectedTerminal()
+        app.typeKey("w", modifierFlags: .command)
+        waitForServerOutput(["display-message", "-p", "-t", "native:0", "#{window_panes}"], equals: "1")
+        XCTAssertTrue(app.groups["Right pane"].waitForNonExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testQuitKeepsServerProgramsAlive() throws {
+        launchConnectedTerminal()
+        let pids = try tmux(["list-panes", "-t", "native:0", "-F", "#{pane_pid}"])
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+        XCTAssertEqual(try tmux(["list-panes", "-t", "native:0", "-F", "#{pane_pid}"]), pids)
+    }
+
+    @MainActor
+    func testServerSelectionChangesTabWithoutSendingInput() throws {
+        launchConnectedTerminal()
+        try tmux(["new-window", "-d", "-t", "native", "-n", "Second", "printf 'waiting\\n'; exec cat"])
+        waitForServerOutput(["capture-pane", "-p", "-t", "native:1"], equals: "waiting")
+        try tmux(["select-window", "-t", "native:1"])
+        XCTAssertTrue(app.windows["Second"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.windows.firstMatch.title, "Second")
+        XCTAssertEqual(try tmux(["capture-pane", "-p", "-t", "native:1"]), "waiting")
+    }
+
+    @MainActor
+    private func launchConnectedTerminal() {
+        app.launch()
+        XCTAssertTrue(app.windows["First"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.groups["Right pane"].waitForExistence(timeout: 5))
+    }
+
+    private func waitForServerOutput(_ arguments: [String], equals expected: String) {
+        let matches = NSPredicate { [weak self] _, _ in
+            guard let self else { return false }
+            return (try? self.tmux(arguments)) == expected
+        }
+        let expectation = XCTNSPredicateExpectation(predicate: matches, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 5), .completed,
+                       "tmux \(arguments.joined(separator: " ")) should report \(expected)")
+    }
+
+    @discardableResult
+    private func tmux(_ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/tmux")
+        process.arguments = ["-L", socket!] + arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "TmuxControlModeUITests", code: Int(process.terminationStatus),
+                          userInfo: [NSLocalizedDescriptionKey: text])
+        }
+        return text
+    }
+}

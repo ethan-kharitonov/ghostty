@@ -1631,7 +1631,7 @@ const SplitTreeSplit = extern struct {
                 null,
                 null,
             );
-            break :size max + end_min;
+            break :size std.math.add(c_int, max, end_min) catch return;
         };
 
         // If our size is zero then we can't do any math. I don't know

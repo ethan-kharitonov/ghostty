@@ -56,6 +56,7 @@ aprilnea
 aredmondd
 arneshbanerjee
 arvin7liu
+aryanhamedani
 athaapa
 atomk
 aurelleb
@@ -87,6 +88,7 @@ charliie-dev
 chernetskyi
 chronologos
 clemg
+clinta
 cmwetherell
 complexsplit
 crayxt
@@ -190,6 +192,7 @@ jamylak
 jarred-sumner
 jcollie
 jesusvazquez
+jglanz
 jguthmiller
 jmcgover
 jmr
@@ -339,6 +342,7 @@ rmengelbrecht
 rmunn
 robmorgan
 rockorager
+romen
 ronijacobson
 rpfaeffle
 rtgibbons
@@ -377,6 +381,7 @@ thomasfedb
 thoutbeckers
 ticclick
 tnagatomi
+tonypapousek
 toppk
 tothedarktowercame
 trag1c
@@ -404,6 +409,7 @@ yabbal
 yak3d
 yamshta
 ydah
+yeager
 -zaviro
 zenangst
 zenyr
