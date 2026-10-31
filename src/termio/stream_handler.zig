@@ -391,6 +391,14 @@ pub const StreamHandler = struct {
             .report_pwd => try self.reportPwd(value.url),
             .show_desktop_notification => try self.showDesktopNotification(value.title, value.body),
             .progress_report => self.progressReport(value),
+            .program_status => try self.programStatus(value),
+            .osc_unknown => {
+                if (!value.truncated and std.mem.startsWith(u8, value.content, "21337;")) {
+                    self.surfaceMessageWriter(.{ .session_status = .{
+                        .iterm = try apprt.surface.Message.WriteReq.init(self.alloc, value.content[6..]),
+                    } });
+                }
+            },
             .start_hyperlink => try self.startHyperlink(value.uri, value.id),
             .clipboard_contents => try self.clipboardContents(value.kind, value.data),
             .semantic_prompt => try self.semanticPrompt(value),
@@ -430,8 +438,6 @@ pub const StreamHandler = struct {
             .title_push,
             .title_pop,
             .kitty_dnd,
-            .osc_unknown,
-            .program_status,
             => {},
         }
     }
@@ -1372,6 +1378,7 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
     ) !void {
         self.terminal.fullReset();
+        self.surfaceMessageWriter(.{ .session_status = .reset });
         try self.setMouseShape(.text);
 
         // Full reset clears Kitty clipboard session grants.
@@ -1918,6 +1925,7 @@ pub const StreamHandler = struct {
         cmd: Stream.Action.SemanticPrompt,
     ) !void {
         switch (cmd.action) {
+            .prompt_start => self.surfaceMessageWriter(.{ .session_status = .end_command }),
             .end_input_start_output => {
                 self.surfaceMessageWriter(.start_command);
             },
@@ -1940,7 +1948,6 @@ pub const StreamHandler = struct {
             .fresh_line,
             .fresh_line_new_prompt,
             .new_command,
-            .prompt_start,
             => {},
         }
 
@@ -2382,6 +2389,26 @@ pub const StreamHandler = struct {
         // Note: we don't have to do a queueRender here because every
         // processed stream will queue a render once it is done processing
         // the read() syscall.
+    }
+
+    fn programStatus(self: *StreamHandler, command: terminal.osc.Command.ProgramStatus) !void {
+        switch (command) {
+            .report => |report| self.surfaceMessageWriter(.{ .session_status = .{ .program = .{
+                .state = report.state,
+                .body = try apprt.surface.Message.WriteReq.init(self.alloc, report.data),
+            } } }),
+            .query => |terminator| switch (terminator) {
+                inline else => |ending| {
+                    // Unlike terminal-grid queries, this protocol is handled by
+                    // the frontend, so tmux followers must answer it themselves.
+                    self.termio_mailbox.send(try termio.Message.writeReq(
+                        self.alloc,
+                        "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ comptime ending.string(),
+                    ), self.renderer_state.mutex);
+                    self.termio_messaged = true;
+                },
+            },
+        }
     }
 
     /// Display a GUI progress report.

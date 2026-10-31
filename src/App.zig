@@ -560,9 +560,18 @@ fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !vo
     }
 
     // Window was not found, it probably quit before we handled the message.
-    // Not a problem, but the tmux messages own their payloads.
+    // Release payloads whose intended receiver no longer exists.
     switch (msg) {
+        .session_status => |update| switch (update) {
+            .iterm => |body| body.deinit(),
+            .program => |report| report.body.deinit(),
+            .reset, .end_command => {},
+        },
+        .kitty_clipboard_read => |v| v.destroy(),
+        .kitty_clipboard_write => |v| v.destroy(),
+        .clipboard_write => |v| v.req.deinit(),
         .tmux_windows => |v| v.destroy(),
+        .pwd_change,
         .tmux_window_renamed,
         .tmux_output,
         .tmux_send_keys,

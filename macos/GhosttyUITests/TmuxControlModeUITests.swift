@@ -34,6 +34,56 @@ final class TmuxControlModeUITests: XCTestCase {
     }
 
     @MainActor
+    func testITermStatusUpdatesTheNativeTab() throws {
+        launchConnectedTerminal()
+        try writePaneOutput("\u{1b}]21337;status=working;indicator=#ffa500\u{7}")
+        XCTAssertTrue(app.staticTexts["working"].waitForExistence(timeout: 5))
+        try writePaneOutput("\u{1b}]21337;status=waiting\u{7}")
+        XCTAssertTrue(app.staticTexts["waiting"].waitForExistence(timeout: 5))
+        try writePaneOutput("\u{1b}]21337;status=;indicator=\u{7}")
+        XCTAssertTrue(app.staticTexts["waiting"].waitForNonExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testProgramStatusUpdatesAndClearsTheNativeTab() throws {
+        launchConnectedTerminal()
+        try writePaneOutput("\u{1b}]7501;state=blocked:id=build/test:app=codex\u{7}")
+        XCTAssertTrue(app.staticTexts["blocked"].waitForExistence(timeout: 5))
+        try writePaneOutput("\u{1b}]7501;state=clear:id=build\u{7}")
+        XCTAssertTrue(app.staticTexts["blocked"].waitForNonExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testProgramStatusCapabilityReplyReachesTheRemoteProgram() throws {
+        launchConnectedTerminal()
+        let script = config.appendingPathExtension("py")
+        defer { try? FileManager.default.removeItem(at: script) }
+        try #"""
+        import os, select, time, tty
+        tty.setraw(0)
+        os.write(1, b'\x1b]7501;?\x1b\\')
+        expected = b'\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\'
+        received = b''
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not received.endswith(b'\x1b\\'):
+            if select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
+                received += os.read(0, 4096)
+        os.write(1, b'SUPPORTED\r\n' if received == expected else b'NO_RESPONSE\r\n')
+        while os.read(0, 4096):
+            pass
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        try tmux(["respawn-pane", "-k", "-t", "native:0.1", "/usr/bin/python3", script.path])
+        waitForServerOutput(["capture-pane", "-p", "-t", "native:0.1"], equals: "SUPPORTED")
+    }
+
+    private func writePaneOutput(_ output: String) throws {
+        let tty = try tmux(["display-message", "-p", "-t", "native:0.1", "#{pane_tty}"])
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: tty))
+        defer { try? handle.close() }
+        try handle.write(contentsOf: Data(output.utf8))
+    }
+
+    @MainActor
     func testCustomTmuxCommandRunsOnServer() throws {
         launchConnectedTerminal()
         app.typeKey("u", modifierFlags: [.control, .shift])

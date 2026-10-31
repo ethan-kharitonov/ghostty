@@ -603,6 +603,13 @@ extension Ghostty {
 
             // Action dispatch
             switch action.tag {
+            case GHOSTTY_ACTION_SESSION_STATUS:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = surfaceView(from: surface) else { return false }
+                view.sessionStatus = TerminalStatus(action.action.session_status)
+                return true
+
             case GHOSTTY_ACTION_COPROCESS:
                 guard target.tag == GHOSTTY_TARGET_SURFACE,
                       let surface = target.target.surface,

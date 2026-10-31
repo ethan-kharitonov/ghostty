@@ -96,6 +96,10 @@ class BaseTerminalController: NSWindowController,
 
     /// Cancellable for aggregating bell state across all surfaces in this controller.
     private var bellStateCancellable: AnyCancellable?
+    private var sessionStatusCancellable: AnyCancellable?
+    private var sessionStatus: TerminalStatus? {
+        didSet { (window as? TerminalWindow)?.sessionStatus = sessionStatus }
+    }
 
     /// Cancellable for clipboard confirmation requests from surfaces in this controller.
     private var clipboardConfirmationCancellable: AnyCancellable?
@@ -155,6 +159,7 @@ class BaseTerminalController: NSWindowController,
 
         // Setup our bell state for the window
         setupBellNotificationPublisher()
+        setupSessionStatusPublisher()
         setupClipboardConfirmationPublisher()
 
         // Setup our notifications for behaviors
@@ -1163,6 +1168,7 @@ class BaseTerminalController: NSWindowController,
 
     override func windowDidLoad() {
         super.windowDidLoad()
+        (window as? TerminalWindow)?.sessionStatus = sessionStatus
 
         // Setup our undo manager.
 
@@ -1714,6 +1720,20 @@ extension BaseTerminalController {
                     userInfo: [Notification.Name.terminalWindowHasBellKey: hasBell]
                 )
             }
+    }
+
+    private func setupSessionStatusPublisher() {
+        sessionStatusCancellable = surfaceValuesPublisher(valueKeyPath: \.sessionStatus, publisherKeyPath: \.$sessionStatus)
+            .map { statuses in
+                statuses.max { lhs, rhs in
+                    let left = lhs.value?.priority ?? 0
+                    let right = rhs.value?.priority ?? 0
+                    return left == right ? lhs.key.uuidString < rhs.key.uuidString : left < right
+                }?.value ?? nil
+            }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.sessionStatus = $0 }
     }
 
     /// Creates a publisher for values on all surfaces in this controller's tree.

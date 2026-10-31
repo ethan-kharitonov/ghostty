@@ -18,6 +18,11 @@ class TerminalWindow: NSWindow {
 
     /// The view model for SwiftUI views
     private var viewModel = ViewModel()
+    private let sessionStatusView = TerminalStatusView()
+
+    var sessionStatus: TerminalStatus? {
+        didSet { sessionStatusView.status = sessionStatus }
+    }
 
     /// Reset split zoom button in titlebar
     private let resetZoomAccessory = NSTitlebarAccessoryViewController()
@@ -167,6 +172,7 @@ class TerminalWindow: NSWindow {
         stackView.spacing = 4
         stackView.alignment = .centerY
         stackView.addArrangedSubview(tabColorIndicator)
+        stackView.addArrangedSubview(sessionStatusView)
         stackView.addArrangedSubview(keyEquivalentLabel)
         stackView.addArrangedSubview(resetZoomTabButton)
         tab.accessoryView = stackView

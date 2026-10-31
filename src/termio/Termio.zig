@@ -353,6 +353,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .mailbox = opts.mailbox,
         .terminal_stream = .init(.{
             .allocator = alloc,
+            .osc_unknown_max_bytes = 4096,
             .handler = handler,
         }),
         .thread_enter_state = thread_enter_state,

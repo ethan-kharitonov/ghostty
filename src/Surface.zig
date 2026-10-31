@@ -157,6 +157,7 @@ config_conditional_state: configpkg.ConditionalState,
 /// This is set to true if our IO thread notifies us our child exited.
 /// This is used to determine if we need to confirm, hold open, etc.
 child_exited: bool = false,
+session_status: @import("SessionStatus.zig") = .{},
 
 /// We maintain our focus state and assume we're focused by default.
 /// If we're not initially focused then apprts can call focusCallback
@@ -915,6 +916,7 @@ pub fn init(
 }
 
 pub fn deinit(self: *Surface) void {
+    self.session_status.deinit(self.alloc);
     // Stop search thread
     if (self.search) |*s| s.deinit();
 
@@ -1285,6 +1287,25 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .session_status => |update| {
+            switch (update) {
+                .iterm => |body| {
+                    defer body.deinit();
+                    try self.session_status.updateITerm(self.alloc, body.slice());
+                },
+                .program => |report| {
+                    defer report.body.deinit();
+                    try self.session_status.updateProgram(self.alloc, .{
+                        .state = report.state,
+                        .data = report.body.slice(),
+                    });
+                },
+                .reset => self.session_status.deinit(self.alloc),
+                .end_command => self.session_status.endCommand(self.alloc),
+            }
+            try self.publishSessionStatus();
+        },
+
         .progress_report => |v| {
             _ = self.rt_app.performAction(
                 .{ .surface = self },
@@ -1419,7 +1440,21 @@ fn selectionScrollTick(self: *Surface) !void {
     try self.queueRender();
 }
 
+fn publishSessionStatus(self: *Surface) !void {
+    var status = try self.session_status.snapshot(self.alloc);
+    defer status.deinit();
+    _ = try self.rt_app.performAction(.{ .surface = self }, .session_status, .{
+        .label = status.label.ptr,
+        .detail = status.detail.ptr,
+        .indicator = status.indicator,
+        .text_color = status.text_color,
+        .priority = status.priority,
+    });
+}
+
 fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
+    self.session_status.endCommand(self.alloc);
+    self.publishSessionStatus() catch |err| log.warn("failed to end session status err={}", .{err});
     // Mark our flag that we exited immediately
     self.child_exited = true;
 

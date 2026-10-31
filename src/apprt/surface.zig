@@ -140,6 +140,13 @@ pub const Message = union(enum) {
     /// Report the progress of an action using a GUI element
     progress_report: terminal.osc.Command.ProgressReport,
 
+    session_status: union(enum) {
+        iterm: WriteReq,
+        program: struct { state: terminal.osc.program_status.State, body: WriteReq },
+        reset,
+        end_command,
+    },
+
     /// A command has started in the shell, start a timer.
     start_command,
 

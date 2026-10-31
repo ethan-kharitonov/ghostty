@@ -373,6 +373,7 @@ pub const Action = union(Key) {
 
     /// Run a local coprocess for a surface. The callback borrows the command.
     coprocess: Coprocess,
+    session_status: SessionStatus,
 
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
@@ -448,6 +449,7 @@ pub const Action = union(Key) {
         resize_window,
         tmux_window,
         coprocess,
+        session_status,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -490,7 +492,7 @@ pub const Action = union(Key) {
         // so we can change this but I want to be aware of it.
         assert(@sizeOf(CValue) == switch (@sizeOf(usize)) {
             4 => 24,
-            8 => 24,
+            8 => 32,
             else => unreachable,
         });
     }
@@ -1197,6 +1199,16 @@ pub const OpenConfig = enum(c_int) {
     test "ghostty.h OpenConfig" {
         try lib.checkGhosttyHEnum(OpenConfig, "GHOSTTY_ACTION_OPEN_CONFIG_");
     }
+};
+
+/// Sync with ghostty_action_session_status_s. Strings are borrowed during the callback.
+pub const SessionStatus = extern struct {
+    label: [*:0]const u8,
+    detail: [*:0]const u8,
+    /// Colors are RRGGBBAA, with zero meaning no explicit color.
+    indicator: u32,
+    text_color: u32,
+    priority: u8,
 };
 
 /// Sync with ghostty_action_coprocess_s.

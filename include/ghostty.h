@@ -1022,6 +1022,7 @@ typedef enum {
   GHOSTTY_ACTION_RESIZE_WINDOW,
   GHOSTTY_ACTION_TMUX_WINDOW,
   GHOSTTY_ACTION_COPROCESS,
+  GHOSTTY_ACTION_SESSION_STATUS,
 } ghostty_action_tag_e;
 
 // The spec and all strings borrowed from it are valid during the action callback.
@@ -1033,6 +1034,14 @@ typedef struct {
   const uint8_t* command;
   uintptr_t command_len;
 } ghostty_action_coprocess_s;
+
+typedef struct {
+  const char* label;
+  const char* detail;
+  uint32_t indicator;
+  uint32_t text_color;
+  uint8_t priority;
+} ghostty_action_session_status_s;
 
 typedef struct {
   uint64_t session;
@@ -1064,6 +1073,7 @@ typedef struct {
 typedef union {
   ghostty_action_tmux_window_s tmux_window;
   ghostty_action_coprocess_s coprocess;
+  ghostty_action_session_status_s session_status;
   ghostty_action_split_direction_e new_split;
   ghostty_action_fullscreen_e toggle_fullscreen;
   ghostty_action_move_tab_s move_tab;

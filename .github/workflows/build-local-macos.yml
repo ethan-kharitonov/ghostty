@@ -22,6 +22,7 @@ jobs:
     # to save caches. Include UI execution and a 25 percent margin.
     timeout-minutes: 22
     env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-global-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -58,7 +59,7 @@ jobs:
           ditto "$RUNNER_TEMP/GhosttyDerived/Build/Products/ReleaseLocal/Ghostty.app" zig-out/Ghostty.app
 
       - name: Check terminal and SSH integration
-        run: zig build test -Dtest-filter=tmux -Dtest-filter=SplitTree -Dtest-filter=termio -Dtest-filter=ssh -Dtest-filter=Binding -Dtest-filter=Action
+        run: zig build test -Dtest-filter=tmux -Dtest-filter=SplitTree -Dtest-filter=termio -Dtest-filter=ssh -Dtest-filter=Binding -Dtest-filter=Action -Dtest-filter=SessionStatus
 
       - name: Check native tmux behavior
         run: xcodebuild -project macos/Ghostty.xcodeproj -scheme Ghostty -configuration ReleaseLocal -arch arm64 -derivedDataPath "$RUNNER_TEMP/GhosttyDerived" -resultBundlePath "$RUNNER_TEMP/GhosttyUITests.xcresult" -parallel-testing-enabled NO -only-testing:GhosttyUITests/TmuxControlModeUITests -only-testing:GhosttyTests/TerminalCoprocessTests test-without-building
