@@ -29,8 +29,8 @@
 //! surface the apprt creates for a leaf names the pane it is for and
 //! claims exactly that pane (`canClaim`), which rejects a pane from an
 //! earlier attach, from another window, or one that already has a
-//! follower. A pane that moves to another window is released and recreated
-//! there (`releaseMisplaced`); surfaces are never reparented across tabs.
+//! follower. Runtimes with `tmuxReparent` retain a moved pane's surface;
+//! other runtimes release it and create a replacement in the destination.
 //! Other apprts use the sequential path instead, where each new surface
 //! adopts the next pane that has no follower yet.
 //!

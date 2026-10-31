@@ -6,6 +6,7 @@ final class TerminalStatusView: NSStackView {
 
     var status: TerminalStatus? {
         didSet {
+            Ghostty.logger.info("status view priority=\(self.status?.priority ?? 0)")
             isHidden = status == nil || (status?.label.isEmpty == true && status?.indicator == 0)
             label.stringValue = status?.label ?? ""
             label.textColor = color(status?.textColor ?? 0) ?? .secondaryLabelColor

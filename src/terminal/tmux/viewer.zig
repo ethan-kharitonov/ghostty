@@ -940,6 +940,12 @@ pub const Viewer = struct {
         visible_layout_str: []const u8,
         raw_flags: []const u8,
     ) !void {
+        if (!self.mirror_panes) {
+            // A join emits separate source and destination notifications. Only
+            // a complete listing can distinguish a moved pane from a closed one.
+            try self.queueListWindows();
+            return;
+        }
         // Find the window this layout change is for.
         const window: *Window = self.findWindow(window_id) orelse {
             log.info("layout change for unknown window id={}", .{window_id});

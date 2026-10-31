@@ -604,6 +604,7 @@ extension Ghostty {
             // Action dispatch
             switch action.tag {
             case GHOSTTY_ACTION_SESSION_STATUS:
+                Ghostty.logger.info("status callback priority=\(action.action.session_status.priority)")
                 guard target.tag == GHOSTTY_TARGET_SURFACE,
                       let surface = target.target.surface,
                       let view = surfaceView(from: surface) else { return false }

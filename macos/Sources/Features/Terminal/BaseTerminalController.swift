@@ -100,7 +100,10 @@ class BaseTerminalController: NSWindowController,
     private var menuExclusionBeforeSuspending: Bool?
     var presentationSuspended: Bool { menuExclusionBeforeSuspending != nil }
     private var sessionStatus: TerminalStatus? {
-        didSet { (window as? TerminalWindow)?.sessionStatus = sessionStatus }
+        didSet {
+            Ghostty.logger.info("status controller priority=\(self.sessionStatus?.priority ?? 0) loaded=\(self.isWindowLoaded)")
+            (window as? TerminalWindow)?.sessionStatus = sessionStatus
+        }
     }
 
     /// Cancellable for clipboard confirmation requests from surfaces in this controller.
