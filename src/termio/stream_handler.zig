@@ -2423,10 +2423,9 @@ pub const StreamHandler = struct {
                     // Unlike terminal-grid queries, this protocol is handled by
                     // the frontend, so tmux followers must answer it themselves.
                     log.info("answering program status query follower={}", .{self.tmux_follower});
-                    self.termio_mailbox.send(try termio.Message.writeReq(
-                        self.alloc,
-                        "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ comptime ending.string(),
-                    ), self.renderer_state.mutex);
+                    self.termio_mailbox.send(.{
+                        .write_stable = "\x1b]7501;" ++ terminal.osc.program_status.query_reply ++ comptime ending.string(),
+                    }, self.renderer_state.mutex);
                     self.termio_messaged = true;
                 },
             },
