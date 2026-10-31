@@ -16,7 +16,7 @@ pub const Snapshot = struct {
     /// The allocator that owns this snapshot, including the struct itself.
     alloc: Allocator,
 
-    /// Arena holding `windows` and every layout tree within it.
+    /// Arena holding the windows, their lookup index, and their layout trees.
     arena: ArenaAllocator.State,
 
     /// The session these windows belong to.
@@ -24,6 +24,7 @@ pub const Snapshot = struct {
 
     /// The windows, in the order tmux reported them (index order).
     windows: []Window,
+    window_index: std.AutoHashMapUnmanaged(usize, usize),
 
     /// Native-window groups from the `@affinities` session option.
     affinities: []const u8,
@@ -71,21 +72,25 @@ pub const Snapshot = struct {
         const arena_alloc = arena.allocator();
 
         const copy = try arena_alloc.alloc(Window, windows.len);
-        for (windows, copy) |src, *dst| dst.* = .{
-            .id = src.id,
-            .index = src.index,
-            .name = try arena_alloc.dupe(u8, src.name),
-            .active = src.active,
-            .zoomed = src.zoomed,
-            .active_pane = src.active_pane,
-            .width = src.width,
-            .height = src.height,
-            .layout = try copyLayout(arena_alloc, src.layout),
-            .visible_layout = if (src.visible_layout) |v|
-                try copyLayout(arena_alloc, v)
-            else
-                null,
-        };
+        var window_index: std.AutoHashMapUnmanaged(usize, usize) = .empty;
+        for (windows, copy, 0..) |src, *dst, index| {
+            dst.* = .{
+                .id = src.id,
+                .index = src.index,
+                .name = try arena_alloc.dupe(u8, src.name),
+                .active = src.active,
+                .zoomed = src.zoomed,
+                .active_pane = src.active_pane,
+                .width = src.width,
+                .height = src.height,
+                .layout = try copyLayout(arena_alloc, src.layout),
+                .visible_layout = if (src.visible_layout) |v|
+                    try copyLayout(arena_alloc, v)
+                else
+                    null,
+            };
+            try window_index.put(arena_alloc, src.id, index);
+        }
         const affinities = if (windows.len > 0)
             try arena_alloc.dupe(u8, windows[0].affinities)
         else
@@ -96,6 +101,7 @@ pub const Snapshot = struct {
             .arena = arena.state,
             .session_id = session_id,
             .windows = copy,
+            .window_index = window_index,
             .affinities = affinities,
         };
 
@@ -108,12 +114,23 @@ pub const Snapshot = struct {
         alloc.destroy(self);
     }
 
-    pub fn findWindow(self: *Snapshot, window_id: usize) ?*Window {
-        for (self.windows) |*window| {
-            if (window.id == window_id) return window;
-        }
+    pub fn windowIndex(self: *const Snapshot, window_id: usize) ?usize {
+        return self.window_index.get(window_id);
+    }
 
-        return null;
+    pub fn findWindow(self: *Snapshot, window_id: usize) ?*Window {
+        return &self.windows[self.windowIndex(window_id) orelse return null];
+    }
+
+    /// Swap tabs while retaining the session's index slots and stable window IDs.
+    pub fn swapWindows(self: *Snapshot, first: usize, second: usize) bool {
+        const a = self.windowIndex(first) orelse return false;
+        const b = self.windowIndex(second) orelse return false;
+        std.mem.swap(Window, &self.windows[a], &self.windows[b]);
+        std.mem.swap(usize, &self.windows[a].index, &self.windows[b].index);
+        self.window_index.getPtr(first).?.* = b;
+        self.window_index.getPtr(second).?.* = a;
+        return true;
     }
 
     /// Record a rename tmux told us about after this snapshot was taken.
@@ -220,7 +237,7 @@ test "tmux snapshot copies the layout tree" {
     try testing.expectEqual(@as(usize, 2), window.visible_layout.?.content.pane);
 }
 
-test "tmux snapshot records renames and the current window" {
+test "tmux snapshot preserves identity through renaming and reordering" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -255,4 +272,14 @@ test "tmux snapshot records renames and the current window" {
     snapshot.setActiveWindow(1);
     try testing.expect(!snapshot.windows[0].active);
     try testing.expect(snapshot.windows[1].active);
+
+    try testing.expect(snapshot.swapWindows(0, 1));
+    try testing.expectEqual(@as(usize, 1), snapshot.windows[0].id);
+    try testing.expectEqual(@as(usize, 0), snapshot.findWindow(1).?.index);
+    try testing.expectEqualStrings("editor", snapshot.findWindow(1).?.name);
+    try testing.expect(snapshot.findWindow(1).?.active);
+    try testing.expectEqual(@as(usize, 1), snapshot.windowIndex(0).?);
+    try testing.expect(!snapshot.swapWindows(0, 9));
+    try testing.expect(try snapshot.renameWindow(0, "renamed"));
+    try testing.expectEqualStrings("renamed", snapshot.windows[1].name);
 }

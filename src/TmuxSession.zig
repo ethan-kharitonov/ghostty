@@ -334,7 +334,7 @@ pub const Session = struct {
             // from @ghostty-affinities right away rather than on the next
             // list-windows, so a tab opened in between can't join it.
             if (window_id) |wid| {
-                if (!self.windowHasSurface(wid)) {
+                if (self.windowSurface(wid) == null) {
                     self.removeWindowFromAffinities(wid);
                     self.saveAffinities();
                 }
@@ -342,33 +342,33 @@ pub const Session = struct {
         }
     }
 
-    fn windowHasSurface(self: *const Session, window_id: usize) bool {
-        var it = self.pane_window.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.* != window_id) continue;
-            if (self.pane_to_surface.contains(entry.key_ptr.*)) return true;
+    fn windowSurface(self: *const Session, window_id: usize) ?*Surface {
+        const snapshot = self.layout orelse return null;
+        const window = snapshot.findWindow(window_id) orelse return null;
+        return self.surfaceInLayout(window.layout);
+    }
+
+    fn surfaceInLayout(self: *const Session, layout: Layout) ?*Surface {
+        switch (layout.content) {
+            .pane => |pane| return self.pane_to_surface.get(pane),
+            .horizontal, .vertical => |children| {
+                for (children) |child| {
+                    if (self.surfaceInLayout(child)) |surface| return surface;
+                }
+                return null;
+            },
         }
-        return false;
     }
 
     fn removeWindowFromAffinities(self: *Session, window_id: usize) void {
-        var gi: usize = 0;
-        while (gi < self.affinities.items.len) {
-            const group = &self.affinities.items[gi];
-            var ii: usize = 0;
-            while (ii < group.items.len) {
-                if (group.items[ii] == window_id) {
-                    _ = group.orderedRemove(ii);
-                    continue;
-                }
-                ii += 1;
-            }
+        for (self.affinities.items, 0..) |*group, index| {
+            const member = std.mem.indexOfScalar(usize, group.items, window_id) orelse continue;
+            _ = group.orderedRemove(member);
             if (group.items.len == 0) {
-                var removed = self.affinities.orderedRemove(gi);
+                var removed = self.affinities.orderedRemove(index);
                 removed.deinit(self.alloc);
-                continue;
             }
-            gi += 1;
+            return;
         }
     }
 
@@ -811,40 +811,39 @@ pub const Session = struct {
     fn syncAffinities(self: *Session) void {
         const snapshot = self.layout orelse return;
 
-        var live: std.AutoHashMapUnmanaged(usize, void) = .empty;
+        var live: std.AutoHashMapUnmanaged(usize, bool) = .empty;
         defer live.deinit(self.alloc);
         for (snapshot.windows) |window| {
-            live.put(self.alloc, window.id, {}) catch |err| {
+            live.put(self.alloc, window.id, false) catch |err| {
                 log.warn("failed to index live tmux window err={}", .{err});
                 return;
             };
         }
 
-        // Drop windows that no longer exist.
-        var gi: usize = 0;
-        while (gi < self.affinities.items.len) {
-            const group = &self.affinities.items[gi];
-            var ii: usize = 0;
-            while (ii < group.items.len) {
-                if (live.contains(group.items[ii])) {
-                    ii += 1;
-                    continue;
-                }
-                _ = group.orderedRemove(ii);
+        var group_count: usize = 0;
+        for (self.affinities.items) |*group| {
+            var member_count: usize = 0;
+            for (group.items) |id| {
+                const classified = live.getPtr(id) orelse continue;
+                classified.* = true;
+                group.items[member_count] = id;
+                member_count += 1;
             }
-            if (group.items.len == 0) {
-                var removed = self.affinities.orderedRemove(gi);
-                removed.deinit(self.alloc);
-                continue;
+            group.items.len = member_count;
+            if (member_count == 0) {
+                group.deinit(self.alloc);
+            } else {
+                self.affinities.items[group_count] = group.*;
+                group_count += 1;
             }
-            gi += 1;
         }
+        self.affinities.items.len = group_count;
 
         // Windows we have never classified.
         var unknown: std.ArrayList(usize) = .empty;
         defer unknown.deinit(self.alloc);
         for (snapshot.windows) |window| {
-            if (self.affinityGroupIndex(window.id) != null) continue;
+            if (live.get(window.id).?) continue;
             unknown.append(self.alloc, window.id) catch |err| {
                 log.warn("failed to collect new tmux window err={}", .{err});
                 return;
@@ -953,13 +952,7 @@ pub const Session = struct {
         const group = self.affinities.items[group_i];
         for (group.items) |sibling_wid| {
             if (sibling_wid == window_id) continue;
-            var it = self.pane_window.iterator();
-            while (it.next()) |kv| {
-                if (kv.value_ptr.* != sibling_wid) continue;
-                if (self.pane_to_surface.get(kv.key_ptr.*)) |surface| {
-                    return surface;
-                }
-            }
+            if (self.windowSurface(sibling_wid)) |surface| return surface;
         }
         return null;
     }
@@ -1083,10 +1076,16 @@ pub const Session = struct {
             _ = self.window_views.remove(spec.window);
         }
 
+        var placements = self.tabPlacements(alloc) catch |err| {
+            log.warn("failed to place tmux tabs err={}", .{err});
+            return;
+        };
+        defer placements.deinit(alloc);
         for (snapshot.windows) |*window| {
             const spec = self.buildSpec(
                 alloc,
                 window,
+                placements.get(window.id).?,
                 reselect == window.id or
                     (!self.mirrored.contains(window.id) and
                         self.selection.current() == window.id),
@@ -1099,15 +1098,13 @@ pub const Session = struct {
             };
         }
 
-        // A new window starts at the size of its native window rather than
-        // waiting for its tab to be shown.
-        for (snapshot.windows) |window| {
-            if (self.window_sizes.contains(window.id)) continue;
-            const group = self.affinityGroupIndex(window.id) orelse continue;
-            for (self.affinities.items[group].items) |id| {
-                const size = self.window_sizes.get(id) orelse continue;
-                self.sizeWindow(window.id, size);
-                break;
+        // New tabs inherit their group's established size before they are shown.
+        for (self.affinities.items) |group| {
+            const size = for (group.items) |id| {
+                if (self.window_sizes.get(id)) |existing| break existing;
+            } else continue;
+            for (group.items) |id| {
+                if (!self.window_sizes.contains(id)) self.sizeWindow(id, size);
             }
         }
 
@@ -1178,11 +1175,27 @@ pub const Session = struct {
 
         var arena: std.heap.ArenaAllocator = .init(self.alloc);
         defer arena.deinit();
-        var spec = self.buildSpec(arena.allocator(), window, select) catch |err| {
+        var placements = self.tabPlacements(arena.allocator()) catch |err| {
+            log.warn("failed to place tmux tabs err={}", .{err});
+            return;
+        };
+        defer placements.deinit(arena.allocator());
+        var spec = self.buildSpec(arena.allocator(), window, placements.get(window_id).?, select) catch |err| {
             log.warn("failed to build tmux tab err={}", .{err});
             return;
         };
         self.perform(&spec);
+    }
+
+    fn tabPlacements(self: *Session, alloc: Allocator) !std.AutoHashMapUnmanaged(usize, tmux_mirror.Placement) {
+        const snapshot = self.layout.?;
+        const order = try alloc.alloc(usize, snapshot.windows.len);
+        defer alloc.free(order);
+        for (snapshot.windows, order) |window, *id| id.* = window.id;
+        const groups = try alloc.alloc([]const usize, self.affinities.items.len);
+        defer alloc.free(groups);
+        for (self.affinities.items, groups) |group, *members| members.* = group.items;
+        return tmux_mirror.planPlacements(alloc, order, groups, self);
     }
 
     /// Describe the tab of `window` and record what it is about to show.
@@ -1190,10 +1203,9 @@ pub const Session = struct {
         self: *Session,
         alloc: Allocator,
         window: *const Snapshot.Window,
+        place: tmux_mirror.Placement,
         select: bool,
     ) !TmuxWindow.Spec {
-        const snapshot = self.layout.?;
-
         // While zoomed, tmux shows one pane at the size of the window.
         const zoomed: ?usize = zoomed: {
             if (!window.zoomed) break :zoomed null;
@@ -1217,14 +1229,6 @@ pub const Session = struct {
             },
             .split => {},
         };
-
-        const order = try alloc.alloc(usize, snapshot.windows.len);
-        for (snapshot.windows, order) |w, *id| id.* = w.id;
-        const group: []const usize = if (self.affinityGroupIndex(window.id)) |i|
-            self.affinities.items[i].items
-        else
-            &.{window.id};
-        const place = tmux_mirror.placement(order, group, window.id, self);
 
         self.spec_serial += 1;
         try self.mirrored.put(self.alloc, window.id, self.spec_serial);
@@ -1595,11 +1599,7 @@ pub const Session = struct {
 
             // Until tmux lists the windows again, our idea of the order is
             // what further reorders are planned against.
-            const a = std.mem.indexOfScalar(usize, order, swap.a).?;
-            const b = std.mem.indexOfScalar(usize, order, swap.b).?;
-            std.mem.swap(usize, &order[a], &order[b]);
-            std.mem.swap(Snapshot.Window, &snapshot.windows[a], &snapshot.windows[b]);
-            std.mem.swap(usize, &snapshot.windows[a].index, &snapshot.windows[b].index);
+            _ = snapshot.swapWindows(swap.a, swap.b);
         }
         if (reselect) self.sendCommandFmt("select-window -t @{d}\n", .{current.?});
         self.refreshWindows();
@@ -1770,7 +1770,7 @@ pub const Session = struct {
         for (self.affinities.items) |group| {
             var group_has_surface = false;
             for (group.items) |window_id| {
-                if (self.windowHasSurface(window_id)) {
+                if (self.windowSurface(window_id) != null) {
                     group_has_surface = true;
                     break;
                 }
@@ -1778,9 +1778,7 @@ pub const Session = struct {
             if (group_has_surface) continue;
 
             for (group.items) |window_id| {
-                const window = for (snapshot.windows) |candidate| {
-                    if (candidate.id == window_id) break candidate;
-                } else continue;
+                const window = snapshot.findWindow(window_id) orelse continue;
                 panes.clearRetainingCapacity();
                 self.flatten(&panes, window.layout, .right);
                 for (panes.items) |pane| {
@@ -1951,7 +1949,7 @@ pub const Session = struct {
     /// surfaces have initialized.
     fn isTab(self: *const Session, window_id: usize) bool {
         if (comptime native_layout) return self.mirrored.contains(window_id);
-        return self.windowHasSurface(window_id);
+        return self.windowSurface(window_id) != null;
     }
 
     fn windowListedBefore(self: *const Session, a: usize, b: usize) bool {
@@ -1965,10 +1963,7 @@ pub const Session = struct {
     /// it isn't there.
     fn windowRank(self: *const Session, window_id: usize) usize {
         const snapshot = self.layout orelse return std.math.maxInt(usize);
-        for (snapshot.windows, 0..) |window, i| {
-            if (window.id == window_id) return i;
-        }
-        return std.math.maxInt(usize);
+        return snapshot.windowIndex(window_id) orelse std.math.maxInt(usize);
     }
 
     /// Give a tmux window a native window of its own. A tab moved to a

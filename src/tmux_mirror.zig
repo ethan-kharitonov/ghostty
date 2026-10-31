@@ -375,32 +375,46 @@ pub fn isMisplaced(pane_window: anytype, placed: anytype, pane: usize) bool {
     return placed.get(pane) != window;
 }
 
-/// Place the tab of `window`. `order` holds every tmux window id in index
-/// order and `group` the windows that share a native window with it, in
-/// any order and including `window` itself. `ctx.hasTab(id)` tells whether
-/// a window already has a tab.
-///
-/// Tabs are created and updated in index order, so by the time `window` is
-/// placed every group member before it has a tab. A tab follows the group
-/// member just before it in index order; the first one of a group goes
-/// into the native window of any group member that already has a tab.
-pub fn placement(
+/// Plan all tabs in index order. Groups may list members in any order.
+/// `ctx.hasTab(id)` identifies existing native tabs; earlier entries in
+/// `order` will be created before the tabs that follow them.
+pub fn planPlacements(
+    alloc: Allocator,
     order: []const usize,
-    group: []const usize,
-    window: usize,
+    groups: []const []const usize,
     ctx: anytype,
-) Placement {
-    var after: ?usize = null;
-    for (order) |id| {
-        if (id == window) break;
-        if (std.mem.indexOfScalar(usize, group, id) != null) after = id;
+) Allocator.Error!std.AutoHashMapUnmanaged(usize, Placement) {
+    var membership: std.AutoHashMapUnmanaged(usize, usize) = .empty;
+    defer membership.deinit(alloc);
+    const anchors = try alloc.alloc([2]?usize, groups.len);
+    defer alloc.free(anchors);
+    @memset(anchors, .{ null, null });
+    const previous = try alloc.alloc(?usize, groups.len);
+    defer alloc.free(previous);
+    @memset(previous, null);
+    for (groups, 0..) |group, index| {
+        for (group) |id| {
+            try membership.put(alloc, id, index);
+            if (!ctx.hasTab(id)) continue;
+            if (anchors[index][0] == null) {
+                anchors[index][0] = id;
+            } else if (anchors[index][1] == null) {
+                anchors[index][1] = id;
+            }
+        }
     }
-
-    const beside: ?usize = after orelse for (group) |id| {
-        if (id != window and ctx.hasTab(id)) break id;
-    } else null;
-
-    return .{ .beside = beside, .after = after };
+    var result: std.AutoHashMapUnmanaged(usize, Placement) = .empty;
+    errdefer result.deinit(alloc);
+    for (order) |id| {
+        const place: Placement = if (membership.get(id)) |group| place: {
+            const after = previous[group];
+            const anchor = if (anchors[group][0] == id) anchors[group][1] else anchors[group][0];
+            previous[group] = id;
+            break :place .{ .after = after, .beside = after orelse anchor };
+        } else .{ .after = null, .beside = null };
+        try result.put(alloc, id, place);
+    }
+    return result;
 }
 
 /// Which tmux window is current and which pane is active, as seen from
@@ -1134,37 +1148,21 @@ const TestTabs = struct {
 };
 
 test "tmux mirror: tab placement" {
+    const alloc = testing.allocator;
     const order = [_]usize{ 4, 1, 7, 2, 9 };
+    var initial = try planPlacements(alloc, &order, &.{ &.{ 2, 1 }, &.{ 4, 7, 9 } }, TestTabs{ .tabs = &.{4} });
+    defer initial.deinit(alloc);
+    try testing.expectEqual(Placement{ .beside = null, .after = null }, initial.get(1).?);
+    try testing.expectEqual(Placement{ .beside = 1, .after = 1 }, initial.get(2).?);
+    try testing.expectEqual(Placement{ .beside = 7, .after = 7 }, initial.get(9).?);
 
-    // First of its group with no tabs yet: a new native window.
-    try testing.expectEqual(
-        Placement{ .beside = null, .after = null },
-        placement(&order, &.{ 1, 2 }, 1, TestTabs{ .tabs = &.{} }),
-    );
+    var moved = try planPlacements(alloc, &order, &.{&.{ 7, 9, 4 }}, TestTabs{ .tabs = &.{ 4, 7, 9 } });
+    defer moved.deinit(alloc);
+    try testing.expectEqual(Placement{ .beside = 7, .after = null }, moved.get(4).?);
 
-    // Later group members follow the one before them in index order,
-    // whatever order the group lists them in.
-    try testing.expectEqual(
-        Placement{ .beside = 1, .after = 1 },
-        placement(&order, &.{ 2, 1 }, 2, TestTabs{ .tabs = &.{} }),
-    );
-    try testing.expectEqual(
-        Placement{ .beside = 7, .after = 7 },
-        placement(&order, &.{ 4, 7, 9 }, 9, TestTabs{ .tabs = &.{4} }),
-    );
-
-    // A window that moved to the front of its group goes before the tabs
-    // that already exist, in their native window.
-    try testing.expectEqual(
-        Placement{ .beside = 7, .after = null },
-        placement(&order, &.{ 7, 9, 4 }, 4, TestTabs{ .tabs = &.{ 4, 7, 9 } }),
-    );
-
-    // A window alone in its group.
-    try testing.expectEqual(
-        Placement{ .beside = null, .after = null },
-        placement(&order, &.{7}, 7, TestTabs{ .tabs = &.{7} }),
-    );
+    var alone = try planPlacements(alloc, &order, &.{&.{7}}, TestTabs{ .tabs = &.{7} });
+    defer alone.deinit(alloc);
+    try testing.expectEqual(Placement{ .beside = null, .after = null }, alone.get(7).?);
 }
 
 test "tmux mirror: selection from tmux" {
