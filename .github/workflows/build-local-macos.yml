@@ -18,9 +18,9 @@ concurrency:
 jobs:
   build:
     runs-on: xcode-27
-    # The cold app build took 386 seconds in run 41148885193. Allow
-    # another compilation for the test targets, with a 25 percent margin.
-    timeout-minutes: 17
+    # Run 41156429914 took 694s to build, 212s for core tests, and 32s
+    # to save caches. Include UI execution and a 25 percent margin.
+    timeout-minutes: 22
     env:
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-global-cache
     steps:
