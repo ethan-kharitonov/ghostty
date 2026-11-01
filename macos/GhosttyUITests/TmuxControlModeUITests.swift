@@ -1,6 +1,5 @@
 import XCTest
 import AppKit
-import ApplicationServices
 
 final class TmuxControlModeUITests: XCTestCase {
     private var app: XCUIApplication!
@@ -41,18 +40,12 @@ final class TmuxControlModeUITests: XCTestCase {
         try tmux(["new-window", "-t", "native", "-n", "Second", "exec cat"])
         try tmux(["split-window", "-h", "-t", "native:1", "exec cat"])
         launchConnectedTerminal(windowTitle: "Second")
-        let process = try XCTUnwrap(NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first)
-        var windows: CFTypeRef?
-        XCTAssertEqual(AXUIElementCopyAttributeValue(AXUIElementCreateApplication(process.processIdentifier),
-                                                    kAXWindowsAttribute as CFString, &windows), .success)
-        let window = try XCTUnwrap((windows as? [AXUIElement])?.first { candidate in
-            var title: CFTypeRef?
-            return AXUIElementCopyAttributeValue(candidate, kAXTitleAttribute as CFString, &title) == .success
-                && title as? String == "Second"
-        })
-        var fullscreen: CFTypeRef?
-        XCTAssertEqual(AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &fullscreen), .success)
-        XCTAssertEqual(fullscreen as? Bool, true)
+        app.menuBars.menuBarItems["Window"].click()
+        XCTAssertTrue(app.menuItems["Exit Full Screen"].waitForExistence(timeout: 5))
+        app.menuItems["Exit Full Screen"].click()
+        app.menuBars.menuBarItems["Window"].click()
+        XCTAssertTrue(app.menuItems["Enter Full Screen"].waitForExistence(timeout: 5))
+        app.typeKey(.escape, modifierFlags: [])
     }
 
     @MainActor

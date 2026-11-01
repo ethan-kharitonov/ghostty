@@ -1775,6 +1775,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 extension TerminalController {
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
+        case #selector(toggleGhosttyFullScreen):
+            let fullscreen = window?.styleMask.contains(.fullScreen) == true || fullscreenStyle?.isFullscreen == true
+            item.title = fullscreen ? "Exit Full Screen" : "Enter Full Screen"
+            return focusedSurface != nil
+
         case #selector(closeTabsOnTheRight):
             guard let window, let tabGroup = window.tabGroup else { return false }
             guard let currentIndex = tabGroup.windows.firstIndex(of: window) else { return false }
