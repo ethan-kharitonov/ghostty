@@ -33,6 +33,22 @@ final class TmuxControlModeUITests: XCTestCase {
     }
 
     @MainActor
+    func testFullScreenAttachUsesTheSelectedNativeTab() throws {
+        let base = try String(contentsOf: config, encoding: .utf8)
+        try (base + "\nfullscreen = false\ntmux-fullscreen = true\n")
+            .write(to: config, atomically: true, encoding: .utf8)
+        try tmux(["new-window", "-t", "native", "-n", "Second", "exec cat"])
+        try tmux(["split-window", "-h", "-t", "native:1", "exec cat"])
+        launchConnectedTerminal(windowTitle: "Second")
+        app.menuBars.menuBarItems["Window"].click()
+        XCTAssertTrue(app.menuItems["Exit Full Screen"].waitForExistence(timeout: 5))
+        app.menuItems["Exit Full Screen"].click()
+        app.menuBars.menuBarItems["Window"].click()
+        XCTAssertTrue(app.menuItems["Enter Full Screen"].waitForExistence(timeout: 5))
+        app.typeKey(.escape, modifierFlags: [])
+    }
+
+    @MainActor
     func testMovingPanesKeepsTheirTerminalViewsAndLiveOutput() throws {
         launchConnectedTerminal()
         try tmux(["new-window", "-d", "-t", "native", "-n", "Second", "exec cat"])
@@ -245,9 +261,9 @@ final class TmuxControlModeUITests: XCTestCase {
     }
 
     @MainActor
-    private func launchConnectedTerminal() {
+    private func launchConnectedTerminal(windowTitle: String = "First") {
         app.launch()
-        XCTAssertTrue(app.windows["First"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.windows[windowTitle].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.groups["Right pane"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(app.windows.count, 1, app.debugDescription)
     }

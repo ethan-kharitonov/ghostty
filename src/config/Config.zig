@@ -1529,6 +1529,11 @@ maximize: bool = false,
 /// decorations.
 fullscreen: Fullscreen = .false,
 
+/// Start native tmux tab groups in macOS fullscreen. This is independent of
+/// `fullscreen`, which controls regular windows, including the SSH connection
+/// window. Only supported on macOS.
+@"tmux-fullscreen": bool = false,
+
 /// The title Ghostty will use for the window. This will force the title of the
 /// window to be this title at all times and Ghostty will ignore any set title
 /// escape sequences programs (such as Neovim) may send.
